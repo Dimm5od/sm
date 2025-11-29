@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <!-- <meta http-equiv="Content-Security-Policy"
+    <meta http-equiv="Content-Security-Policy"
             content="default-src 'none';
             manifest-src 'self';
             script-src 'self' 'nonce-c13d9af436';
@@ -11,7 +11,7 @@
             style-src 'self';
             img-src 'self' data:;
             base-uri 'none';
-            object-src 'none';"> -->
+            object-src 'none';">
     <link rel="icon" type="image/png" href="favicon.png">
     <link rel="stylesheet" href="css/main.css?v2">
     <link rel="manifest" href="manifest.json">
@@ -170,7 +170,8 @@
     <!-- форма поиска, показывается все время после авторизации -->
     <div id="searchArea" class="hidden">
         <form id="searchForm" autocomplete="off">
-            <label for="searchQuery"></label><input type="text" id="searchQuery" placeholder="Поиск..." required enterkeyhint="search"/>
+            <label for="searchQuery"></label><input type="text" id="searchQuery" placeholder="Поиск..." required
+                                                    enterkeyhint="search"/>
             <button type="submit" id="searchBtn">Искать</button>
         </form>
         <div id="searchResultsList"></div>
@@ -357,6 +358,9 @@
                     const res = await sendRequest('terminate', {}, apiUrl, login, secretKey);
                     if (res && typeof res === 'object' && res.ok === true) {
                         alert('Ваша регистрация и все данные удалены с сервера');
+                        localStorage.removeItem('dataChanged_'+login.slice(-3));
+                        localStorage.removeItem('lastBackupDate_'+login.slice(-3));
+                        localStorage.removeItem('lastWarningDate_'+login.slice(-3));
                     } else {
                         showError('Удаление данных', res);
                     }
@@ -486,12 +490,12 @@
 
             const newPassphrase = document.getElementById('passphrase2').value;
 
-            if(newPassphrase === ''){
+            if (newPassphrase === '') {
                 alert('Введите новую секретную фразу!');
                 return false;
             }
 
-            if(newPassphrase === document.getElementById('passphrase1').value){
+            if (newPassphrase === document.getElementById('passphrase1').value) {
                 alert('Новая фраза должна отличаться от старой!');
                 return false;
             }
@@ -536,7 +540,7 @@
             // Заблокируем кнопку на время обработки
             btn.disabled = true;
             btn.classList.remove('actionBtn');
-            btn.textContent = `Обработка: 0 из ${totalCount}`;
+            btn.textContent = `Обработка...`;
             document.getElementById('btnCancelPasswd').disabled = true;
 
             // экспорт данных со старого логина
@@ -557,12 +561,13 @@
                     text = JSON.parse(text);
                 } catch (e) {
                     console.warn('Invalid JSON:', text.slice(0, 300) + '...');
-                    alert('Ошибка обработки, не валидный JSON в бэкапе данных!');
+                    alert('Ошибка обработки, не валидный JSON в бекапе данных!');
                     resetPasswdBtn();
                     return;
                 }
 
                 totalCount = res.count; // Всего записей для переноса
+                btn.textContent = `Обработка: 0 из ${totalCount}`;
 
 
                 let i = 0;
@@ -612,7 +617,10 @@
                     showError('Ошибка удаления старых данных:', res);
                 }
                 alert(`Секретная фраза изменена\n\nОбработано записей: ${importedRecords} из ${totalCount} шт.\n\nПрежний аккаунт и все его данные удалены. Сейчас будет выполнен вход с новой парольной фразой`);
-
+                localStorage.setItem('dataChanged_'+newLogin.slice(-3), 'true'); // есть измененные данные для бекапа
+                localStorage.removeItem('dataChanged_'+login.slice(-3));
+                localStorage.removeItem('lastBackupDate_'+login.slice(-3));
+                localStorage.removeItem('lastWarningDate_'+login.slice(-3));
 
                 document.getElementById('passphrase1').value = '';
                 document.getElementById('passphrase2').value = '';
@@ -879,6 +887,7 @@
                 }
             }
             results.textContent = results.textContent + `Импорт завершен\n\nУспешно: ${importedRecords} из ${totalRecords}\nОшибок: ${errorRecords}\n\n`;
+            localStorage.setItem('dataChanged_'+login.slice(-3),'true'); // для предупреждения о бекапе
         }
 
         // === Import data Close button
@@ -907,7 +916,7 @@
                 alert(textPleaseLoginFirst);
                 return;
             }
-            if (confirm('Резервное копирование\n\nВаши данные будут сохранены с сервера в зашифрованном виде, одним файлом.\n\nЭтот файл можно использовать как резервную копию для восстановления данных в будущем, а так же расшифровать и экспортировать как текст (JSON)\n\nХотите создать бэкап?')) {
+            if (confirm('Резервное копирование\n\nВаши данные будут сохранены с сервера в зашифрованном виде, одним файлом.\n\nЭтот файл можно использовать как резервную копию для восстановления данных в будущем, а так же расшифровать и экспортировать как текст (JSON)\n\nХотите создать бекап?')) {
                 /**
                  * @typedef {Object} backupResponse
                  * @property {string} filecontent
@@ -919,6 +928,40 @@
                 const res = await sendRequest('backup', {}, apiUrl, login, secretKey);
                 if (res && typeof res === 'object' && res.ok === true) {
 
+                    // Проверка целостности данных в бекапе
+                    const u8 = Uint8Array.from(atob(res.filecontent), c => c.charCodeAt(0));
+                    let text = await ungzip(u8);
+                    try {
+                        text = JSON.parse(text);
+                    } catch (e) {
+                        console.warn('Invalid JSON:', text.slice(0, 300) + '...');
+                        alert('Ошибка обработки, не валидный JSON в бекапе данных!');
+                        resetPasswdBtn();
+                        return;
+                    }
+                    const backupCount = res.count; // Записей в бекапе по ответу сервера
+                    let okCount = 0;
+                    let errorCount = 0;
+                    for (const n of text.content) {
+                        // Расшифровка полученных данных
+                        const title = await decryptText(n.rtitle, aesKey);
+                        const tags = await decryptText(n.rtags, aesKey);
+                        const text = await decryptText(n.content, aesKey);
+                        const strings = [title, tags, text];
+                        const errors = ['[Corrupted data]', '[Corrupted data / invalid key]'];
+                        if (strings.some(s => errors.includes(s))) {
+                            errorCount++; // Увеличиваем счетчик ошибок
+                        } else {
+                            okCount++; // Увеличиваем счетчик ОК
+                        }
+                    }
+                    if (errorCount > 0) {
+                        alert(`Внимание!\n\nВ бекапе обнаружены поврежденные записи: ${errorCount} шт.`);
+                    }
+                    const backupCountReal = okCount + errorCount;
+                    if (backupCount !== backupCountReal) {
+                        alert(`внимание!\n\nОбнаружено несоответствие количества записей в бекапе!\n\nДолжно быть ${backupCount} шт, по факту ${backupCountReal} шт.`);
+                    }
 
                     const b64 = res.filecontent;
                     const filename = res.filename;
@@ -934,13 +977,21 @@
                     a.href = url;
                     a.download = filename;
 
-                    // «нажимаем» ссылку программно
+                    // "нажимаем" ссылку программно для инициации сохранения файла браузером
                     document.body.appendChild(a);
                     a.click();
 
                     // очищаем за собой
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
+
+                    // Записываем дату создания последнего бекапа в localStorage
+                    const now = new Date().toISOString();
+                    const suffix = login.slice(-3);
+                    localStorage.setItem('lastBackupDate_'+suffix, now);
+                    localStorage.setItem('lastWarningDate_'+suffix, now);
+                    localStorage.removeItem('dataChanged_'+suffix);
+                    if(debugIsOn)console.log('Дата последнего бэкапа сохранена в localStorage:', now);
                 } else {
                     showError('Backup', res);
                 }
@@ -1136,12 +1187,20 @@
             document.getElementById('importBtn').disabled = false;
             document.getElementById('terminateAccountBtn').disabled = false;
 
+            // проверим и покажем предложение создать бекап, если есть данные
+            if(res.records > 0){
+                await checkBackupDate();
+            }
+
             // Изменения в интерфейсе после инициализации и логина
             document.getElementById('searchQuery').value = ''; // очистка поля поиска
 
             let lastSwitch = sessionStorage.getItem('lastSwitch');
             let lastViewID = sessionStorage.getItem('lastViewID');
             let lastEditID = sessionStorage.getItem('lastEditID');
+
+            switchTo(['searchArea', 'loginInfo']);
+            document.getElementById('searchQuery').focus();
 
             // Восстановим последнее действие, если оно было
             if (lastSwitch === 'viewArea' && lastViewID) {
@@ -1151,9 +1210,6 @@
                 // откроем заново форму редактирования
                 await viewNote(lastEditID);
                 document.getElementById('btnActionEdit').click();
-            } else {
-                switchTo(['searchArea', 'loginInfo']);
-                document.getElementById('searchQuery').focus();
             }
         }
 
@@ -1269,7 +1325,7 @@
                 login,
                 secretKey);
             if (res && typeof res === 'object' && res.ok === true && res.id) {
-
+                localStorage.setItem('dataChanged_'+login.slice(-3),'true'); // для предупреждения о бекапе
                 // Изменения в форму добавления
                 sessionStorage.removeItem('lastEditID');
                 await viewNote(res.id);
@@ -1326,7 +1382,6 @@
                 document.getElementById('editTitleInput').value = noteTitle;
                 document.getElementById('editTagsInput').value = noteTags;
                 document.getElementById('editTextInput').value = noteContent;
-                makeWysiwyg('editTextInput');
 
                 // Заполняем форму просмотра
                 document.getElementById('viewTitle').textContent = noteTitle;
@@ -1361,6 +1416,7 @@
 
                 // Кнопка редактирования
                 document.getElementById('btnActionEdit').onclick = () => {
+                    makeWysiwyg('editTextInput');
                     switchTo('editArea');
                     setHash('edit:' + id);
                     document.getElementById('editTitleInput').focus();
@@ -1411,7 +1467,7 @@
 
             activeArea = activeList[0] || ''; // установим флаг какая область сейчас активна
 
-                // Убрать hash страницы
+            // Убрать hash страницы
             setHash('');
 
             // Запомнить последние активные области
@@ -1444,73 +1500,73 @@
         }
 
         function escHandler(event) {
-            if(activeArea === 'viewArea') {
+            if (activeArea === 'viewArea') {
                 if (event.key === "Escape") {
                     document.getElementById("btnActionClose").click();
                     return;
                 }
             }
-            if(activeArea === 'importArea') {
+            if (activeArea === 'importArea') {
                 if (event.key === "Escape") {
                     document.getElementById("closeImportBtn").click();
                     return;
                 }
             }
-            if(activeArea === 'exportArea') {
+            if (activeArea === 'exportArea') {
                 if (event.key === "Escape") {
                     document.getElementById("closeExportBtn").click();
                     return;
                 }
             }
-            if(activeArea === 'passwdArea') {
+            if (activeArea === 'passwdArea') {
                 if (event.key === "Escape" && document.getElementById("btnCancelPasswd").disabled === false) {
                     document.getElementById("btnCancelPasswd").click();
                     return;
                 }
             }
-             if(activeArea === 'loginArea') {
+            if (activeArea === 'loginArea') {
                 if (event.key === "Escape" && !document.getElementById("settingsArea").classList.contains('hidden')) {
                     document.getElementById("settingsArea").classList.add('hidden');
                     document.getElementById("actionsArea").classList.add('hidden');
                     return;
                 }
             }
-            if(activeArea === 'textArea') {
+            if (activeArea === 'textArea') {
                 if (event.key === "Escape") {
                     document.getElementById("closeTextBtn").click();
                     return;
                 }
             }
-            if(activeArea === 'restoreArea') {
+            if (activeArea === 'restoreArea') {
                 if (event.key === "Escape") {
                     document.getElementById("closeRestoreBtn").click();
                     return;
                 }
             }
-            if(activeArea === 'editArea') {
+            if (activeArea === 'editArea') {
                 if (event.key === "Escape") {
-                    title = document.getElementById('editTitleInput').value;
-                    tags = document.getElementById('editTagsInput').value;
-                    if( (title === '' && tags === '') || confirm('Закрыть форму?')) {
+                    let title = document.getElementById('editTitleInput').value;
+                    let tags = document.getElementById('editTagsInput').value;
+                    if ((title === '' && tags === '') || confirm('Закрыть форму?')) {
                         document.getElementById("btnCancelEdit").click();
                     }
                     return;
                 }
             }
-            if(activeArea === 'searchArea') {
+            if (activeArea === 'searchArea') {
                 if (event.key === "Escape") {
-                    if(document.getElementById('searchResultsList').textContent === '') return;
+                    if (document.getElementById('searchResultsList').textContent === '') return;
                     const box = document.querySelector('.autocomplete-box');
                     if (box && box.style.display !== 'none') {
                         return;
                     }
                     document.getElementById("clearResultLink").click();
-                    return;
+                    // return; // если есть еще код ниже
                 }
             }
         }
 
-        document.addEventListener("keydown", escHandler, { capture: true });
+        document.addEventListener("keydown", escHandler, {capture: true});
 
     </script>
 </div>
