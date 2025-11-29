@@ -1,3 +1,5 @@
+// noinspection JSDeprecatedSymbols
+
 function bytesToHex(buf) {
     return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -348,7 +350,7 @@ async function decryptText(dataB64, key) {
     try {
         data = base64ToUint8(dataB64);
     } catch (err) {
-        console.error("Decrypt error: base64ToUint8: "+ err);
+        console.error("Decrypt error: base64ToUint8: " + err);
         return "[Corrupted data]";
     }
     const dec = new TextDecoder();
@@ -358,7 +360,7 @@ async function decryptText(dataB64, key) {
     while (pos < data.length) {
         if (pos + 4 + IV_SIZE > data.length) {
             console.error('Corrupted data: incomplete header');
-            return '[Corrupted data]';
+            return '[Corrupted data]'; // строку НЕ изменять!
         }
 
         const dv = new DataView(data.buffer, pos, 4);
@@ -381,7 +383,7 @@ async function decryptText(dataB64, key) {
             result += dec.decode(decrypted);
         } catch (err) {
             console.error("Decrypt error: Corrupted data / invalid key");
-            decrypted = "[Corrupted data / invalid key]";
+            decrypted = "[Corrupted data / invalid key]"; // строку НЕ изменять!
             result += decrypted;
         }
 
@@ -471,6 +473,7 @@ function bbcodeToHtml(input) {
     );
 
     // 3. Замены PHPBB тегов
+    // noinspection HtmlUnknownTarget,HtmlUnknownAnchorTarget
     const replacements = [
         {re: /\[b](.*?)\[\/b]/gis, to: "<b>$1</b>"},
         {re: /\[i](.*?)\[\/i]/gis, to: "<i>$1</i>"},
@@ -483,7 +486,11 @@ function bbcodeToHtml(input) {
         {re: /\[code](.*?)\[\/code]/gis, to: "<code>$1</code>"},
         {re: /\[quote](.*?)\[\/quote]/gis, to: "<pre>$1</pre>"},
         {
-            re: /\[url=(https?:\/\/[^\]]+)](.*?)\[\/url]/gis,
+            re: /\[url=([^\]]+)](.*?)\[\/url]/gis,
+            to: '<a href="$1" target="_blank" rel="noopener noreferrer">$2</a>'
+        },
+        {
+            re: /\[link=([^\]]+)](.*?)\[\/link]/gis,
             to: '<a href="$1" target="_blank" rel="noopener noreferrer">$2</a>'
         },
         {
@@ -509,6 +516,7 @@ function initTagAutocomplete(inputId) {
 
     let suggestionBox = document.createElement('div');
     suggestionBox.className = 'autocomplete-box';
+    suggestionBox.id = 'autocomplete-'+inputId;
     document.body.appendChild(suggestionBox);
 
     let activeIndex = -1; // индекс текущего выделенного элемента
@@ -583,7 +591,8 @@ function initTagAutocomplete(inputId) {
                             matchedTags.set(tagLower, tag);
                         }
                     }
-                } catch {}
+                } catch {
+                }
             }
 
             const result = Array.from(matchedTags.values());
@@ -654,11 +663,13 @@ function initTagAutocomplete(inputId) {
                 e.preventDefault();
                 activeIndex = (activeIndex + 1) % items.length;
                 updateActiveItem(items);
+                scrollToActive(inputId);
                 break;
             case 'ArrowUp':
                 e.preventDefault();
                 activeIndex = (activeIndex - 1 + items.length) % items.length;
                 updateActiveItem(items);
+                scrollToActive(inputId);
                 break;
             case 'Enter':
                 if (activeIndex >= 0 && activeIndex < currentSuggestions.length) {
@@ -691,6 +702,43 @@ function initTagAutocomplete(inputId) {
     });
 }
 
+/**
+ * Прокручивает автокомплит, чтобы активный элемент был видимым
+ * @param {string} inputId - ID input'а (для поиска .autocomplete-box)
+ */
+// В main.js, обновите scrollToActive с логами
+function scrollToActive(inputId) {
+
+    const boxId = `autocomplete-${inputId}`; // Уникальный ID, как в initTagAutocomplete
+    const box = document.getElementById(boxId);
+
+    if (!box) {
+        return;
+    }
+
+    const activeLi = box.querySelector('div.active');
+
+    if (!activeLi) {
+        return;
+    }
+
+    // Расчёт позиции (относительно box)
+    const boxRect = box.getBoundingClientRect();
+    const liRect = activeLi.getBoundingClientRect();
+    const scrollTop = box.scrollTop;
+    const boxHeight = box.clientHeight;
+    const liTopRelative = liRect.top - boxRect.top + scrollTop; // Относительная позиция li
+    const liHeight = liRect.height;
+
+    // Прокрутка: если li вне viewport box — центрируем
+    if (liTopRelative < scrollTop) {
+        // Слишком высоко
+        box.scrollTop = liTopRelative - (boxHeight / 3); // 1/3 сверху для плавности
+    } else if (liTopRelative + liHeight > scrollTop + boxHeight) {
+        // Слишком низко
+        box.scrollTop = liTopRelative + liHeight - (boxHeight * 2 / 3); // 2/3 снизу
+    }
+}
 
 function formatTags(tagsString, myClass = 'tag-label') {
     if (!tagsString) return "";
@@ -1119,12 +1167,14 @@ function makeWysiwyg(id) {
     // конвертеры BB↔HTML
     function bbToHtml(bb) {
         //alert('debug: bbToHtml '+bb);
+        // noinspection HtmlUnknownTarget
         return bb
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
             .replace(/\r\n?/g, '\n')
             .replace(/\[url=(.*?)](.*?)\[\/url]/gi, '<a href="$1" target="_blank">$2</a>')
+            .replace(/\[link=(.*?)](.*?)\[\/link]/gi, '<a href="$1" target="_blank">$2</a>')
             .replace(/\[quote](.*?)\[\/quote]/gis, '<pre>$1</pre>')
             .replace(/\[code](.*?)\[\/code]/gis, '<code>$1</code>')
             .replace(/\n*\[ol]\n*/gi, '<ol>').replace(/\n*\[\/ol]\n*/gi, '</ol>')
@@ -1304,10 +1354,9 @@ async function doSignup(apiUrl, login, secretKey, options = {}) {
         } else {
             // Ошибка регистрации
             if (debugIsOn) console.warn(`Ошибка регистрации на ${apiUrl} как ${login} с ключом ${secretKey}: [${res_reg.error}] ${res_reg.msg}`);
-            if(res_reg.error  === 'too_many_requests'){
+            if (res_reg.error === 'too_many_requests') {
                 alert(res_reg.msg);
-            }
-            else {
+            } else {
                 showError("Ошибка регистрации", res_reg);
             }
             return false;
@@ -1352,14 +1401,16 @@ function ungzipFallback(arrayBuffer) {
     const FLG = bytes[3];
 
     if (FLG & 4) { // FEXTRA
-        const xlen = bytes[pos] | (bytes[pos+1] << 8);
+        const xlen = bytes[pos] | (bytes[pos + 1] << 8);
         pos += 2 + xlen;
     }
     if (FLG & 8) { // FNAME
-        while (bytes[pos++] !== 0);
+        // noinspection StatementWithEmptyBodyJS
+        while (bytes[pos++] !== 0) ;
     }
     if (FLG & 16) { // FCOMMENT
-        while (bytes[pos++] !== 0);
+        // noinspection StatementWithEmptyBodyJS
+        while (bytes[pos++] !== 0) ;
     }
     if (FLG & 2) { // FHCRC
         pos += 2;
@@ -1383,27 +1434,31 @@ function tinyInflate(input) {
     // Наиболее компактная JS-реализация inflate.
     // Это адаптация публичного кода (немного сокращена).
     // Работает со всеми DEFLATE потоками.
-    function error(e){ throw new Error(e); }
+    function error(e) {
+        throw new Error(e);
+    }
+
     let ip = 0, out = [];
 
-    function readBit(){
-        let r = (input[ip>>3] >> (ip&7)) & 1;
+    function readBit() {
+        let r = (input[ip >> 3] >> (ip & 7)) & 1;
         ip++;
         return r;
     }
-    function readBits(n){
+
+    function readBits(n) {
         let r = 0;
-        for (let i=0;i<n;i++) r |= readBit()<<i;
+        for (let i = 0; i < n; i++) r |= readBit() << i;
         return r;
     }
 
-    function readCode(tbl){
-        let code = 0, first=0, idx=0;
-        for (let len=1; len<=15; len++){
-            code |= readBit() << (len-1);
+    function readCode(tbl) {
+        let code = 0, first = 0, idx = 0;
+        for (let len = 1; len <= 15; len++) {
+            code |= readBit() << (len - 1);
             let count = tbl.count[len];
             if (code - first < count)
-                return tbl.symbol[idx + (code-first)];
+                return tbl.symbol[idx + (code - first)];
             idx += count;
             first = (first + count) << 1;
             code <<= 1;
@@ -1411,45 +1466,44 @@ function tinyInflate(input) {
         error("Invalid Huffman code");
     }
 
-    function buildHuff(lengths){
+    function buildHuff(lengths) {
         let count = new Array(16).fill(0);
         for (let len of lengths) count[len]++;
 
         let next = new Array(16).fill(0);
-        for (let i=1;i<16;i++) next[i] = (next[i-1] + count[i-1]) << 1;
+        for (let i = 1; i < 16; i++) next[i] = (next[i - 1] + count[i - 1]) << 1;
 
         let symbol = new Array(lengths.length);
-        for (let i=0;i<lengths.length;i++){
+        for (let i = 0; i < lengths.length; i++) {
             let len = lengths[i];
             if (len) symbol[next[len]++] = i;
         }
-        return { count, symbol };
+        return {count, symbol};
     }
 
-    function inflateBlock(){
+    function inflateBlock() {
         let type = readBits(2);
 
         if (type === 0) { // uncompressed
-            ip = (ip+7)&~7;
-            let len = input[ip>>3] | (input[(ip>>3)+1]<<8);
+            ip = (ip + 7) & ~7;
+            let len = input[ip >> 3] | (input[(ip >> 3) + 1] << 8);
             ip += 32;
-            for (let i=0;i<len;i++) out.push(input[(ip>>3)+i]);
-            ip += len<<3;
-        }
-        else {
+            for (let i = 0; i < len; i++) out.push(input[(ip >> 3) + i]);
+            ip += len << 3;
+        } else {
             let litlen, dist;
 
             if (type === 1) {
                 litlen = fixedLitLen;
                 dist = fixedDist;
             } else {
-                let hlit = readBits(5)+257;
-                let hdist = readBits(5)+1;
-                let hclen = readBits(4)+4;
+                let hlit = readBits(5) + 257;
+                let hdist = readBits(5) + 1;
+                let hclen = readBits(4) + 4;
 
-                const order = [16,17,18, 0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+                const order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
                 let cl = new Array(19).fill(0);
-                for (let i=0;i<hclen;i++) cl[order[i]] = readBits(3);
+                for (let i = 0; i < hclen; i++) cl[order[i]] = readBits(3);
 
                 let cltable = buildHuff(cl);
                 let lengths = [];
@@ -1459,7 +1513,7 @@ function tinyInflate(input) {
                         lengths.push(sym);
                     } else if (sym === 16) {
                         let repeat = 3 + readBits(2);
-                        let val = lengths[lengths.length-1];
+                        let val = lengths[lengths.length - 1];
                         while (repeat--) lengths.push(val);
                     } else if (sym === 17) {
                         let repeat = 3 + readBits(3);
@@ -1471,7 +1525,7 @@ function tinyInflate(input) {
                 }
 
                 litlen = buildHuff(lengths.slice(0, hlit));
-                dist   = buildHuff(lengths.slice(hlit));
+                dist = buildHuff(lengths.slice(hlit));
             }
 
             while (1) {
@@ -1487,7 +1541,7 @@ function tinyInflate(input) {
                     let dsym = readCode(dist);
                     let distance = DIST_BASE[dsym] + readBits(DIST_EXTRA[dsym]);
 
-                    for (let i=0;i<length;i++) {
+                    for (let i = 0; i < length; i++) {
                         out.push(out[out.length - distance]);
                     }
                 }
@@ -1496,16 +1550,16 @@ function tinyInflate(input) {
     }
 
     // fixed trees
-    const LENGTH_BASE = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
-    const LENGTH_EXTRA= [0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,0];
-    const DIST_BASE   = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
-    const DIST_EXTRA  = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+    const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+    const LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 0];
+    const DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+    const DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
 
     // fixed litlen + dist
-    let fl = new Array(288).fill(0).map((_,i)=> i<144?8 : i<256?9 : i<280?7 :8);
+    let fl = new Array(288).fill(0).map((_, i) => i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8);
     let fd = new Array(32).fill(5);
-    var fixedLitLen = buildHuff(fl);
-    var fixedDist = buildHuff(fd);
+    let fixedLitLen = buildHuff(fl);
+    let fixedDist = buildHuff(fd);
 
     let final = 0;
     while (!final) {
@@ -1542,6 +1596,47 @@ function base64decode(b64) {
         bytes[i] = binary.charCodeAt(i);
     }
     return new TextDecoder().decode(bytes);
+}
+
+/**
+ * Проверка даты последнего бэкапа
+ */
+async function checkBackupDate() {
+    // Проверка при входе: нужно ли предупреждать о бэкапе
+    const X = 14; // Порог в днях (для бэкапа и предупреждений)
+    const suffix = login.slice(-3);
+    const dataChanged = localStorage.getItem('dataChanged_'+suffix);
+    if(!dataChanged) {
+        return;
+    }
+    const lastBackupDateStr = localStorage.getItem('lastBackupDate_'+suffix);
+    const lastWarningDateStr = localStorage.getItem('lastWarningDate_'+suffix);
+    const now = new Date();
+    let daysSinceBackup = false;
+    let daysSinceWarning = 0;
+
+    if (lastBackupDateStr) {
+        const lastBackupDate = new Date(lastBackupDateStr);
+        daysSinceBackup = Math.floor((now - lastBackupDate) / (1000 * 60 * 60 * 24));
+    }
+
+    if (lastWarningDateStr) {
+        const lastWarningDate = new Date(lastWarningDateStr);
+        daysSinceWarning = Math.floor((now - lastWarningDate) / (1000 * 60 * 60 * 24));
+    }
+
+    if (!lastWarningDateStr || daysSinceWarning > X) {
+
+        const message = (daysSinceBackup === false) ? `Похоже вы еще не создавали бекап данных для этого аккаунта. Хотите создать?`:`Вы создавали последний бекап данных ${daysSinceBackup} дн. назад. Хотите создать новый?`;
+        if (confirm(message)) {
+            // Инициируем создание бекапа
+            switchTo(['loginArea', 'settingsArea', 'actionsArea']);
+            document.getElementById('backupBtn').click();
+        } else {
+            // Пользователь отказался от бекапа, просто фиксируем дату предупреждение
+            localStorage.setItem('lastWarningDate_'+suffix, now.toISOString());
+        }
+    }
 }
 
 
