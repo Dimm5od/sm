@@ -2,7 +2,7 @@
   "name": "Secure Memos",
   "short_name": "SMemo",
   "description": "Зашифрованные заметки",
-  "start_url": "/smemo/",
+  "start_url": "/sm/",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#ffffff",
@@ -19,3 +19,4 @@
     }
   ]
 }
+
