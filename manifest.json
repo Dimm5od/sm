@@ -2,10 +2,10 @@
   "name": "Secure Memos",
   "short_name": "SMemo",
   "description": "Зашифрованные заметки",
-  "start_url": "/smemo/client.html",
+  "start_url": "/smemo/",
   "display": "standalone",
   "background_color": "#ffffff",
-  "theme_color": "#3367D6",
+  "theme_color": "#ffffff",
   "icons": [
     {
       "src": "icons/icon-192.png",
