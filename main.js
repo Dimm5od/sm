@@ -1,5 +1,1600 @@
 // noinspection JSDeprecatedSymbols
 
+// ============================================================================================================
+// ===================== Глобальные переменные ================================================================
+// ============================================================================================================
+
+const required_api_version = '1.1'; // Если не совпадает с версией API сервера - будет показано предупреждение
+const client_version = '1.1';
+
+let aesKey, textAesKey, secretKey, login, ENC, apiUrl, activeArea; // общие глобальные переменные
+let isLoggedIn = false; // флаг, выполнен ли вход
+let scorePassphrase = 0; // Стартовый уровень "сложности" введенного секрета
+let serverMaxInput = 5 * 1024 * 1024; // Размер максимального запроса к серверу. API с v1.1 передает при логине
+
+// Настройки по умолчанию
+let debugIsOn = false;  // по умолчанию отладка выключена
+let enableTools = false; // По умолчанию Text Tools отключены
+let unsafePassphrase = false; // По умолчанию включена проверка комплексности паролей
+let settingSavePassphrase = '0'; // По умолчанию сохранение секрета отключено
+
+
+// Текстовые ресурсы
+const messageStorageUnavailable = 'Похоже локальное хранилище не доступно. Настройка будет работать только до перезагрузки страницы!';
+const messagePleaseLoginFirst = 'Ошибка: вход не выполнен!\n\nПеред выполнением этого действия нужно войти на сервер!';
+
+// ============================================================================================================
+// ===================== Назначение обработчиков событий ======================================================
+// ============================================================================================================
+
+// Показываем иконки при вводе passphrase и обновляем индикатор "надежности" по мере набора секрета
+document.getElementById('passphrase').addEventListener('input', async () => {
+    await updateSecretIcons(['secretIcons', 'secretIcons2']);
+    evaluatePassphrase('passphrase', 'progress');
+});
+
+document.getElementById('passphrase2').addEventListener('input', async() => {
+    await updateSecretIcons('secretIcons4');
+    evaluatePassphrase('passphrase2', 'progress2');
+
+});
+document.getElementById('passphrase1').addEventListener('input', async () => {
+    await updateSecretIcons('secretIcons3');
+});
+document.getElementById('enableDebug').addEventListener('change', updateSettingDebug); // Изменение настройки "Включить отладку"
+document.getElementById('debugToggle').addEventListener('click', debugToggle); // Сворачивает / разворачивает панель отладки
+document.getElementById('unsafePassphrase').addEventListener('change', updateSettingUnsafePassphrase); // Изменение настройки "Разрешить простые фразы"
+document.getElementById('enableTools').addEventListener('change', updateSettingTools);
+document.getElementById('savePassphrase').addEventListener('change', updateSettingSavePassphrase); // Изменение настройки "Сохранить секретную фразу"
+document.getElementById('terminateAccountBtn').addEventListener('click', handlerTerminateAccount); // Account termination
+document.getElementById('doDecodeTextBtn').addEventListener('click', handlerDecryptText);  // Decrypt text button
+document.getElementById('apiServer').addEventListener('change', updateApiServer); // Сохранение выбранного сервера при изменении
+document.getElementById('btnTextArea').addEventListener('click', onBtnTextAreaClick); // Show crypt / decrypt text form
+document.getElementById('btnLogout').addEventListener('click', onBtnLogoutClick); // Logout button
+document.addEventListener("keydown", escHandler, {capture: true}); // обработка для нажатия ESC
+
+// ============================================================================================================
+// ===================== Инициализация. Выполняется разово при загрузке страницы ==============================
+// ============================================================================================================
+
+document.getElementById('version').textContent = client_version;
+
+// === Сохранение и загрузка выбранного пользователем сервера
+const selectApiServer = document.getElementById('apiServer');
+if(selectApiServer) {
+    let savedApiServer = localStorageGet('apiServer');
+// Проверяем, что бы значение из localStorage было корректным. Если его нет среди options - используем дефолтное, то что selected в options
+    if (savedApiServer && [...selectApiServer.options].some(o => o.value === savedApiServer)) {
+        selectApiServer.value = savedApiServer;
+    } else {
+        localStorageSet('apiServer', selectApiServer.value);
+    }
+    selectApiServer.dispatchEvent(new Event('change', {bubbles: true})); // имитируем событие
+}
+
+// === Сохранение и загрузка настройки "Отладка"
+debugIsOn = (localStorageGet('enableDebug') === '1'); // восстановим глобальную переменную
+document.getElementById('enableDebug').checked = debugIsOn; // установим / снимем галочку в форме настроек
+if (debugIsOn) { // покажем форму отладки при загрузке страницы
+    document.getElementById('debugToggle').classList.remove('hidden');
+}
+
+// === Восстановление настройки "простые пароли"
+unsafePassphrase = (localStorageGet('unsafePassphrase') === '1'); // восстановим глобальную переменную
+document.getElementById('unsafePassphrase').checked = unsafePassphrase; // установим / снимем галочку в форме настроек
+
+// === Сохранение и загрузка настройки "Включить Text Tools"
+enableTools = (localStorageGet('enableTools') === '1'); // восстановим глобальную переменную
+document.getElementById('enableTools').checked = enableTools; // установим / снимем галочку в форме настроек
+updateSettingTools(); // спрячем / покажем кнопку в зависимости от настроек
+
+
+// === Пробуем восстановить сохраненный секрет и выполнить автоматический логин
+const checkboxSavePassphrase = document.getElementById('savePassphrase');
+(async () => {
+    settingSavePassphrase = localStorageGet('savePassphrase');
+    checkboxSavePassphrase.checked = (settingSavePassphrase === '1');
+
+    let savedPassphrase = sessionStorageGet('passphrase');
+    // Если в sessionStorage фразы нет - попробуем расшифровать из localStorage, если включено сохранение
+    if (!savedPassphrase && settingSavePassphrase === '1') {
+        const enc = localStorageGet("encData");
+        if (enc) {
+            try {
+                /** @type {ArrayBuffer} */
+                let bioKey = await getBioKey();
+                const aesKey = await crypto.subtle.importKey("raw", bioKey, "AES-GCM", false, ["encrypt", "decrypt"]);
+                savedPassphrase = await decryptText(enc, aesKey);
+                sessionStorageSet('passphrase', savedPassphrase);
+                console.log('debug: passphrase расшифрована и записана в sessionStorage!');
+            } catch (e) {
+                console.log('debug: ошибка получения ключа');
+                // ошибка получения ключа / расшифровки, покажем форму логина
+                switchTo('loginArea');
+            }
+        } else {
+            console.log('debug: encData не найден в localStorage!');
+        }
+    }
+
+    if (savedPassphrase) {
+        document.getElementById('passphrase').value = savedPassphrase; // Вставляем фразу в форму
+        document.getElementById('passphrase').dispatchEvent(new Event('input', {bubbles: true})); // что бы сработал вызов updateSecretIcons
+    }
+
+    console.log('пробуем авто вход');
+    // Автоматический вход на случай перезагрузки страницы
+    if (savedPassphrase) {
+        let passphrase = savedPassphrase;
+        evaluatePassphrase('passphrase', 'progress'); // посчитаем "сложность" пароля
+        console.log('debug: автоматический логин');
+        await doLogin(passphrase, true);
+    } else {
+        console.log('debug: passphrase не введена, покажем форму логина');
+        // покажем форму логина
+        switchTo('loginArea');
+    }
+})();
+
+// Запускаем некоторые функции после загрузки DOM
+document.addEventListener('DOMContentLoaded', () => {
+    initPasswordToggles(); // значки для просмотра паролей
+    initTagAutocomplete('searchQuery'); // Подключаем подсказки автозавершения для поиска
+    initTagAutocomplete('editTagsInput'); // Подключаем подсказки автозавершения для тегов
+});
+
+// ============================================================================================================
+// ===================== Функции обработчиков =================================================================
+// ============================================================================================================
+
+function updateApiServer() {
+    localStorageSet('apiServer', this.value);
+    const selectedOption = this.options[this.selectedIndex];
+    const computedStyle = window.getComputedStyle(selectedOption);
+    this.style.backgroundColor = computedStyle.backgroundColor;
+    this.style.color = computedStyle.color;
+}
+function escHandler(event) {
+    if (activeArea === 'viewArea') {
+        if (event.key === "Escape") {
+            document.getElementById("btnActionClose").click();
+            return;
+        }
+        if (event.key === "Delete") {
+            document.getElementById("btnActionDelete").click();
+            return;
+        }
+    }
+    if (activeArea === 'helpArea') {
+        if (event.key === "Escape") {
+            document.getElementById("closeHelpBtn").click();
+            return;
+        }
+    }
+    if (activeArea === 'importArea') {
+        if (event.key === "Escape") {
+            document.getElementById("closeImportBtn").click();
+            return;
+        }
+    }
+    if (activeArea === 'exportArea') {
+        if (event.key === "Escape") {
+            document.getElementById("closeExportBtn").click();
+            return;
+        }
+    }
+    if (activeArea === 'passwdArea') {
+        if (event.key === "Escape" && document.getElementById("btnCancelPasswd").disabled === false) {
+            document.getElementById("btnCancelPasswd").click();
+            return;
+        }
+    }
+    if (activeArea === 'loginArea') {
+        if (event.key === "Escape" && !document.getElementById("settingsArea").classList.contains('hidden')) {
+            updateElements([
+                [['settingsArea', 'actionsArea'], 'classList', 'hidden', 'add']
+            ]);
+            return;
+        }
+    }
+    if (activeArea === 'textArea') {
+        if (event.key === "Escape") {
+            document.getElementById("closeTextBtn").click();
+            return;
+        }
+    }
+    if (activeArea === 'restoreArea') {
+        if (event.key === "Escape") {
+            document.getElementById("closeRestoreBtn").click();
+            return;
+        }
+    }
+    if (activeArea === 'editArea') {
+        if (event.key === "Escape") {
+            let title = document.getElementById('editTitleInput').value;
+            let tags = document.getElementById('editTagsInput').value;
+            if ((title === '' && tags === '') || confirm('Закрыть форму?')) {
+                document.getElementById("btnCancelEdit").click();
+            }
+            return;
+        }
+    }
+    if (activeArea === 'searchArea') {
+        if (event.key === "Escape") {
+            if (document.getElementById('searchResultsList').textContent === '') return;
+            const box = document.querySelector('.autocomplete-box');
+            if (box && box.style.display !== 'none') {
+                return;
+            }
+            document.getElementById("clearResultLink").click();
+            // return; // если есть еще код ниже
+        }
+    }
+}
+
+/**
+ * Действие выполняемое для "выхода" из системы
+ * удаление сохраненной секретной фразы, ключей, флагов, визуальные изменения в интерфейсе и т.д.
+ * @param e
+ */
+function onBtnLogoutClick(e) {
+    e.preventDefault();
+    sessionStorageRemove('passphrase');
+    localStorageRemove('encData');
+    login = false;
+    secretKey = false;
+    aesKey = false;
+    ENC = false;
+    isLoggedIn = false;
+    updateElements([
+        ['passphrase', 'value', ''],
+        ['btnLogout', 'classList', 'hidden', 'add'],
+        [['passwdBtn', 'exportBtn', 'importBtn', 'backupBtn', 'restoreBtn', 'terminateAccountBtn'], 'disabled', true],
+        [['secretIcons', 'secretIcons2', 'secretIcons3'], 'textContent', ''],
+        ['progress', 'style.width', '0%'],
+    ]);
+}
+
+async function handlerDecryptText(e) {
+    e.preventDefault();
+    const area = document.getElementById('encodeTextArea');
+    if (area.value === '') {
+        return;
+    }
+    const decryptedText = await decryptText(area.value, textAesKey);
+    if (decryptedText === '[Corrupted data / invalid key]') {
+        alert('Указанная секретная фраза не подходит для расшифровки этого текста!');
+        return;
+    } else if (decryptedText === '[Corrupted data]') {
+        alert('Ошибка, похоже текст для расшифровки поврежден!');
+        return;
+    }
+    area.value = decryptedText;
+}
+
+/**
+ *
+ * @returns {Promise<void>}
+ */
+async function handlerTerminateAccount(event) {
+    event.preventDefault();
+    if (!isLoggedIn || !login) {
+        alert(messagePleaseLoginFirst);
+        return;
+    }
+    if (confirm('Удаление аккаунта\n\nВы собираетесь безвозвратно удалить все ваши записи и регистрацию на сервере\n\nЭто действие не может быть отменено, все данные будут удалены без возможности восстановления\n\n\nХотите продолжить?')) {
+        if (confirm('Последнее предупреждение. Вы уверены?')) {
+            const res = await sendRequest('terminate', {}, apiUrl, login, secretKey);
+            if (res && typeof res === 'object' && res.ok === true) {
+                alert('Ваша регистрация и все данные удалены с сервера');
+                localStorageRemove('dataChanged_' + login.slice(-3));
+                localStorageRemove('lastBackupDate_' + login.slice(-3));
+                localStorageRemove('lastWarningDate_' + login.slice(-3));
+            } else {
+                showError('Удаление данных', res);
+            }
+        }
+    }
+}
+
+/**
+ * Устанавливает глобальную переменную settingSavePassphrase, инициирует активацию биометрии, охраняет полученный credId и записывает настройку в localStorage
+ * Сама фраза шифруется и сохраняется только по doLogin()
+ * @returns {Promise<void>}
+ */
+async function updateSettingSavePassphrase() {
+    settingSavePassphrase = (this.checked) ? '1' : '0';
+    if (!localStorageSet('savePassphrase', settingSavePassphrase)) {
+        alert('Локальное хранилище не доступно, сохранить фразу не получится!');
+        settingSavePassphrase = 0;
+        checkboxSavePassphrase.checked = false;
+        checkboxSavePassphrase.disabled = true;
+    }
+
+    if (settingSavePassphrase === '1') {
+        // Проверяем и активируем биометрию
+        let credId = localStorageGet("credId");
+
+        if (credId) {
+            // Проверяем сохраненные данные
+            const res = await getBioKeyFromUser();
+            if (res === false) {
+                console.warn("Проверка регистрации биометрии не удалась, удаляем сохраненный credId");
+                // Удалим сохраненные данные биометрии
+                localStorageRemove('credId');
+                localStorageRemove('salt');
+                localStorageRemove('encData');
+                sessionStorageRemove('bioKey');
+                credId = false;
+            }
+        }
+
+        if (!credId) {
+            credId = await registerCredential();
+            if (!credId) {
+                // Не удалось активировать биометрию!
+                console.log('Не удалось активировать биометрию! Фраза не будет сохранена!')
+                alert('Не удалось активировать биометрию. Фраза не будет сохранена');
+                checkboxSavePassphrase.checked = false;
+                settingSavePassphrase = 0;
+            }
+        }
+    } else {
+        // пользователь снял галочку. Удалим сохраненную фразу, но оставим регистрацию биометрии
+        localStorageRemove('encData'); // Удалим фразу из хранилища
+    }
+}
+
+/**
+ * Переключает глобальный флаг enableTools и записывает значение в localStorage
+ * @returns void
+ */
+function updateSettingTools() {
+    if (this instanceof HTMLElement) { // вызов через обработчик события
+        const v = (this.checked) ? '1' : '0';
+        if (!localStorageSet('enableTools', v)) {
+            alert(messageStorageUnavailable);
+        }
+        enableTools = (v === '1'); // обновим глобальную переменную
+    }
+    // Дальше общий код и для event и для прямого вызова
+    // обновим видимость элемента
+    const btn = document.getElementById('btnTextArea');
+    if (enableTools) {
+        btn.classList.remove('hidden');
+    } else {
+        btn.classList.add('hidden');
+    }
+}
+
+/**
+ * Переключает глобальный флаг "отладка включена" и показывает / скрывает переключатель панели отладки
+ * @returns {Promise<void>}
+ */
+async function updateSettingDebug() {
+    const v = (this.checked) ? '1' : '0';
+    if (!localStorageSet('enableDebug', v)) {
+        alert(messageStorageUnavailable);
+    }
+    debugIsOn = (v === '1'); // обновим глобальную переменную
+    if (debugIsOn) {
+        updateElements([
+            [['debugToggle'], 'classList', 'hidden', 'remove'],
+        ]);
+    } else {
+        updateElements([
+            [['debugToggle', 'debug'], 'classList', 'hidden', 'add'],
+        ]);
+    }
+}
+
+/**
+ * Сворачивает / разворачивает панель отладки
+ * @returns {Promise<void>}
+ */
+async function debugToggle() {
+    const debug = document.getElementById('debug');
+    const isHidden = debug.classList.contains('hidden');
+    debug.classList.toggle('hidden', !isHidden);
+    this.textContent = isHidden ? 'Отладка ▲' : 'Отладка ▼';
+}
+
+/**
+ * Обновляет глобальную переменную unsafePassphrase и записывает настройку в localStorage
+ * @returns {Promise<void>}
+ */
+async function updateSettingUnsafePassphrase() {
+    const v = (this.checked) ? '1' : '0';
+    if (!localStorageSet('unsafePassphrase', v)) {
+        alert(messageStorageUnavailable);
+    }
+    unsafePassphrase = (v === '1'); // обновим глобальную переменную
+}
+
+/**
+ * Показывает форму для шифрования / расшифровки произвольного текста с любой парольной фразой
+ * @param e event
+ */
+function onBtnTextAreaClick(e) {
+    e.preventDefault();
+    const textPassphrase = document.getElementById('textPassphrase');
+    if (textPassphrase.value === '') {
+        textPassphrase.value = document.getElementById('passphrase').value;
+        document.getElementById('textAreaIcons').textContent = document.getElementById('secretIcons').textContent;
+        textAesKey = aesKey;
+    }
+    switchTo(['textArea']);
+}
+
+
+// ============================================================================================================
+// ===================== Остальные общие и вспомогательные функции ============================================
+// ===================== универсальные функции вынесены в main.js  ============================================
+
+// === Help show ===
+document.getElementById('btnHelpArea').onclick = (e) => {
+    e.preventDefault();
+    const lastArea= sessionStorageGet('lastSwitch');
+    if(lastArea && lastArea !== 'helpArea'){
+        sessionStorageSet('helpReturn',lastArea); // запомним куда возвращаться при закрытии справки
+    }
+    switchTo(['helpArea']);
+}
+
+// === Help Close button
+document.getElementById('closeHelpBtn').onclick = (e) => {
+    e.preventDefault();
+    const lastArea = sessionStorageGet('helpReturn');
+    if(lastArea && lastArea !== 'searchArea'){
+        switchTo([lastArea]);
+    }
+    else{
+        switchTo(['searchArea', 'loginInfo']);
+    }
+}
+
+// === crypt / decrypt text показываем иконки при вводе passphrase ===
+document.getElementById('textPassphrase').addEventListener('input', async function () {
+    let icons = '';
+    if (this.value) icons = sha256ToIcons(await sha256(this.value), 4);
+    document.getElementById('textAreaIcons').textContent = icons; // выводим результат
+});
+
+document.getElementById('textPassphrase').addEventListener('change', async function () {
+    [, , textAesKey] = await genKeys(this.value); // Получаем новый ключ для шифрования текста
+    //console.log('New textAesKey from '+this.value);
+});
+
+// === Close crypt / decrypt text form ===
+document.getElementById('closeTextBtn').onclick = (e) => {
+    e.preventDefault();
+    //document.getElementById('encodeTextArea').value = ''; // очистка формы
+    switchTo(['searchArea', 'loginInfo']);
+    document.getElementById('searchQuery').focus();
+}
+
+// === Crypt text ===
+document.getElementById('doEncodeTextBtn').onclick = async (e) => {
+    e.preventDefault();
+    const area = document.getElementById('encodeTextArea');
+    if (area.value === '') {
+        return;
+    }
+    area.value = await encryptText(area.value, textAesKey);
+}
+
+// === Copy text btn ===
+document.getElementById('copyTextBtn').onclick = async (e) => {
+    e.preventDefault();
+    const area = document.getElementById('encodeTextArea');
+    await navigator.clipboard.writeText(area.value);
+}
+
+// === Paste text btn ===
+document.getElementById('pasteTextBtn').onclick = async (e) => {
+    e.preventDefault();
+    const area = document.getElementById('encodeTextArea');
+    area.value = await navigator.clipboard.readText();
+}
+
+// === Clear text btn ===
+document.getElementById('clearTextBtn').onclick = (e) => {
+    e.preventDefault();
+    document.getElementById('encodeTextArea').value = '';
+}
+
+// === System settings ===
+document.getElementById('lnkSettings').onclick = (e) => {
+    e.preventDefault();
+    if(document.getElementById('actionsArea').classList.contains('hidden')===false){
+        updateElements(
+            ['lnkSettings','textContent','Настройки ']
+        );
+        switchTo(['loginArea']);
+    }
+    else {
+        updateElements(
+            ['lnkSettings','textContent','Закрыть настройки']
+        );
+        switchTo(['loginArea', 'settingsArea', 'actionsArea']);
+    }
+}
+
+// === Login Settings ===
+document.getElementById('lnkLogout').onclick = (e) => {
+    e.preventDefault();
+    updateElements([[['searchResultsList'], 'textContent', '']]); // очистим результаты поиска
+    switchTo("loginArea");
+}
+
+
+// === Passwd show form ===
+document.getElementById('passwdBtn').onclick = async (e) => {
+    e.preventDefault();
+    if (!isLoggedIn || !login) {
+        alert(messagePleaseLoginFirst);
+        return;
+    }
+    document.getElementById('passphrase1').value = document.getElementById('passphrase').value;
+    document.getElementById('passphrase1').dispatchEvent(new Event('input', {bubbles: true}));
+    switchTo("passwdArea");
+}
+
+// === Passwd Close button
+document.getElementById('btnCancelPasswd').onclick = (e) => {
+    e.preventDefault();
+    updateElements([
+        [['passphrase1', 'passphrase2'], 'value', ''],
+        [['secretIcons4'], 'textContent', ''],
+    ]);
+    switchTo(['loginArea', 'settingsArea', 'actionsArea']);
+}
+
+// === Passwd process
+document.getElementById('btnDoPasswd').onclick = async (e) => {
+    e.preventDefault();
+    if (!isLoggedIn || !login) {
+        alert(messagePleaseLoginFirst);
+        return;
+    }
+
+    const newPassphrase = document.getElementById('passphrase2').value;
+
+    if (newPassphrase === '') {
+        alert('Введите новую секретную фразу!');
+        return false;
+    }
+
+    if (newPassphrase === document.getElementById('passphrase1').value) {
+        alert('Новая фраза должна отличаться от старой!');
+        return false;
+    }
+
+    if (!confirm('Важно: процедура изменение парольной фразы:\n\n1. Создаем аккаунт с новым ключом\n2. Получаем зашифрованные данные со старого аккаунта\n3. Расшифровуем полученные данные\n4. Шифруем данные с новым ключом\n5. Удаляем все существующие данные в НОВОМ аккаунте (если есть)\n6. Загружаем зашифрованные данные в новый аккаунт.\n7. Удаляем старый аккаунт со всеми данными\n\nРекомендуем сейчас прервать процесс и сохранить резервную копию, если вы этого не сделали ранее.\n\nЕсли резервная копия у вас уже есть - нажмите ОК, иначе Отмена')) {
+        return;
+    }
+
+    // проверяем вход (и выполняем регистрацию если нужно) с новым логином
+    const [newLogin, newSecretKey, newAesKey, newENC] = await genKeys(newPassphrase);
+    if (debugIsOn) console.log(`Passwd from ${login} to ${newLogin} with key ${newSecretKey}`);
+
+    let res = await sendRequest('login', {}, apiUrl, newLogin, newSecretKey);
+    if (res && typeof res === 'object' && res.ok === true) {
+        if (debugIsOn) console.log(`Вход выполнен на ${apiUrl} как ${newLogin}, записей в базе: ${res.records}`);
+        if (res.records > 0) {
+            if (!confirm(`Внимание: в аккаунте С НОВОЙ фразой сейчас уже есть ${res.records} записей\n\n Они будут УДАЛЕНЫ!\n\nХотите продолжить?`)) {
+                return;
+            }
+        }
+    } else if (res && typeof res === 'object' && res.error === 'user_not_registered') {
+        if (res.signup === 1) {
+            if (!await doSignup(apiUrl, newLogin, newSecretKey, {noConfirm: true})) {
+                // Ошибка регистрации
+                return false;
+            }
+        } else {
+            // Пользователь не зарегистрирован, регистрация не разрешена
+            alert("Не получается создать нового пользователя, т.к. сервер не разрешает новые регистрации");
+            if (debugIsOn) console.warn(`Пользователь ${newLogin} с ключом ${newSecretKey} не существует на сервере ${apiUrl}. Регистрация не доступна.`);
+            return false;
+        }
+    } else {
+        showError("Login error", res);
+        return false;
+    }
+
+    let totalCount, importedRecords;
+
+    let btn = document.getElementById('btnDoPasswd');
+    // Заблокируем кнопку на время обработки
+    updateElements([
+        [['btnDoPasswd', 'btnCancelPasswd'], 'disabled', true],
+        ['btnDoPasswd', 'textContent', 'Обработка...'],
+        ['btnDoPasswd', 'classList', 'actionBtn', 'remove']
+    ]);
+
+    // экспорт данных со старого логина
+    /**
+     * @typedef {Object} backupResponse
+     * @property {string} filecontent
+     * @property {boolean} ok
+     * @property {string} filename
+     * @property {number} count
+     */
+
+    /** @type {backupResponse} */
+    res = await sendRequest('backup', {}, apiUrl, login, secretKey);
+    if (res && typeof res === 'object' && res.ok === true) {
+        const u8 = new Uint8Array([...atob(res.filecontent)].map(c => c.charCodeAt(0)));
+        let text = await ungzip(u8);
+        try {
+            text = JSON.parse(text);
+        } catch (e) {
+            console.warn('Invalid JSON:', text.slice(0, 300) + '...');
+            alert('Ошибка обработки, не валидный JSON в бекапе данных!');
+            resetPasswdBtn();
+            return;
+        }
+
+        totalCount = res.count; // Всего записей для переноса
+        btn.textContent = `Обработка: 0 из ${totalCount}`;
+
+
+        let i = 0;
+        const data = []; // массив со всеми записями для загрузки на сервер через passwd
+        for (const n of text.content) {
+            i++;
+            // Расшифровка полученных данных
+            const title = await decryptText(n.rtitle, aesKey);
+            const tags = await decryptText(n.rtags, aesKey);
+            const text = await decryptText(n.content, aesKey);
+
+            // Добавляем запись в новый логин
+            // Кодируем данные и добавляем в список
+            data.push({
+                uid: n.uid,
+                title: await newENC.encodeForIndex(title),
+                rtitle: await encryptText(title, newAesKey),
+                content: await encryptText(text, newAesKey),
+                tags: await newENC.encodeForIndex(tags),
+                rtags: await encryptText(tags, newAesKey),
+                date_created: n.date_created,
+                date_modified: n.date_modified
+            });
+
+            // обновим процент выполнения
+            btn.textContent = `Обработка: ${i} из ${totalCount}`;
+        }
+
+        // Загрузка результатов на сервер
+        btn.textContent = `Загрузка новых данных на сервер...`;
+        const b64content = base64encode(JSON.stringify(data));
+        res = await sendRequest('restore', {content: b64content, passwd: true}, apiUrl, newLogin, newSecretKey);
+        if (res && typeof res === 'object' && res.ok === true) {
+            importedRecords = res.rows;
+        } else {
+            showError('Не удалось загрузить новые данные на сервер\n\nВсе сделанные изменения отменены, ваша секретная фраза остается прежней!\n\nдетали ошибки: [op=restore]', res);
+            resetPasswdBtn(); // разблокируем кнопки
+            return false;
+        }
+        btn.textContent = `Обработка завершена`;
+
+        // удаление старого логина и всех данных если все записи перенесены в новый
+        res = await sendRequest('terminate', {}, apiUrl, login, secretKey);
+        if (res && typeof res === 'object' && res.ok === true) {
+            if (debugIsOn) console.warn(`Аккаунт ${login} удален`)
+        } else {
+            showError('Ошибка удаления старых данных:', res);
+        }
+        alert(`Секретная фраза изменена\n\nОбработано записей: ${importedRecords} из ${totalCount} шт.\n\nПрежний аккаунт и все его данные удалены. Сейчас будет выполнен вход с новой парольной фразой`);
+        localStorageSet('dataChanged_' + newLogin.slice(-3), 'true'); // есть измененные данные для бекапа
+        localStorageRemove('dataChanged_' + login.slice(-3));
+        localStorageRemove('lastBackupDate_' + login.slice(-3));
+        localStorageRemove('lastWarningDate_' + login.slice(-3));
+        updateElements([
+            [['passphrase1', 'passphrase2'], 'value', ''],
+            [['secretIcons3', 'secretIcons4'], 'textContent', ''],
+            [['passphrase'], 'value', newPassphrase], // обновим passphrase в интерфейсе
+            ['progress2', 'style.width', '0%'],
+        ]);
+        resetPasswdBtn();
+        document.getElementById('passphrase').dispatchEvent(new Event('input', {bubbles: true}));
+        await doLogin(newPassphrase);
+
+    } else {
+        showError('Не удалось получить данные для расшифровки\n\nВаша секретная фраза остается прежней!\n\nдетали ошибки: [op=backup]', res);
+        resetPasswdBtn(); // разблокируем кнопки
+        return false;
+    }
+}
+
+function resetPasswdBtn() {
+    updateElements([
+        [['btnDoPasswd', 'btnCancelPasswd'], 'disabled', false],
+        ['btnDoPasswd', 'classList', 'actionBtn', 'add'],
+        ['btnDoPasswd', 'textContent', 'Изменить секретную фразу'],
+    ]);
+}
+
+// === Restore backup show form ===
+document.getElementById('restoreBtn').onclick = async (e) => {
+    e.preventDefault();
+    if (!isLoggedIn || !login) {
+        alert(messagePleaseLoginFirst);
+        return;
+    }
+    switchTo("restoreArea");
+}
+// === Restore backup Close button
+document.getElementById('closeRestoreBtn').onclick = (e) => {
+    e.preventDefault();
+    // очистка данных
+    updateElements([['fileInputBackup', 'value', '']]);
+    cleanupRestore();
+    switchTo(['loginArea', 'settingsArea', 'actionsArea']);
+}
+
+let restoreContent; //
+
+// === Restore file load
+document.getElementById('fileInputBackup').addEventListener('change', async (e) => {
+    // очистка
+    cleanupRestore();
+
+    const file = e.target.files[0];
+    if (!file) {
+        return;
+    }
+
+    const info = document.getElementById('backupInfo');
+    const name = file.name;
+    const ext = name.split('.').pop().toLowerCase();
+
+    let text;
+
+    if (ext === 'gz') {
+        // извлечем текст из архива
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            text = await ungzip(arrayBuffer);
+        } catch (err) {
+            info.textContent = ('Ошибка: не удалось извлечь данных из GZIP архива. Вероятно, архив поврежден!');
+            e.target.value = '';
+            return false;
+        }
+    } else if (ext === 'json' || ext === 'txt') {
+        // загружен текстовый JSON
+        text = await file.text();
+    } else {
+        info.textContent = ('Ошибка: архив должен быть в формате xxxxx.json.gz (сжатый) или xxxxx.json (текстовый)');
+        e.target.value = '';
+        return false;
+    }
+
+    /** @type {{date?:string, rows?:number, signature?:string, content?:string}} */
+    let data;
+
+    try {
+        data = JSON.parse(text);
+    } catch (err) {
+        info.textContent = ('Ошибка: не удалось разобрать данные JSON!');
+        e.target.value = '';
+        return false;
+    }
+
+    if (!data.date || !data.rows || !data.signature || !data.content || !Array.isArray(data.content) || data.content.length === 0) {
+        info.textContent = ('Ошибка: Не удалось распознать структуру архива');
+        e.target.value = '';
+        return false;
+    }
+
+    // Проверка парольной фразы
+    const recNum = rand(0, data.content.length - 1);
+    const testText = await decryptText(data.content[recNum].rtitle, aesKey);
+    if (testText === '[Corrupted data]' || testText === '[Corrupted data / invalid key]') {
+        info.textContent = ('Ошибка: ваша текущая парольная фраза не подходит для этого бекапа!');
+        e.target.value = '';
+        return;
+    }
+
+    let sizeName = 'КБ';
+    let sizeDivider = 1024;
+    const contentLength = new TextEncoder().encode(text).length;
+    if (contentLength > 1024 * 1024) {
+        sizeName = 'МБ';
+        sizeDivider = 1024 * 1024;
+    }
+    const contentSize = Math.round(contentLength / sizeDivider * 100) / 100;
+    const serverMaxSize = Math.round(serverMaxInput / sizeDivider * 100) / 100;
+    const checkSize = (contentSize < serverMaxSize) ? 'OK' : 'ERROR';
+
+
+    info.textContent = `Файл: ${name}\nДата создания: ${data.date}\nЗаписей: ${data.content.length + 1} шт.\nРазмер: ${contentSize}${sizeName} (${checkSize}, сервер принимает до ${serverMaxSize}${sizeName})\nПодпись: ` + data.signature.slice(0, 6) + "..." + data.signature.slice(-6);
+    restoreContent = data; // сохраним данные для последующей обработки
+    updateElements([
+        [['doRestoreBtn', 'doDecryptBtn'], 'disabled', false],
+        ['doRestoreBtn', 'classList', 'actionBtn', 'add']
+    ]);
+});
+
+// === Decrypt backup process
+document.getElementById('doDecryptBtn').onclick = async (e) => {
+    e.preventDefault();
+    if (!isLoggedIn || !login) {
+        alert(messagePleaseLoginFirst);
+        return;
+    }
+    if (!confirm('Экспорт данных\n\nВыбранный архив будет расшифрован и вы сможете сохранить все записи из него в JSON (текстовом) формате\n\nХотите продолжить?')) {
+        return;
+    }
+
+    const data = [];
+    for (const n of restoreContent.content) {
+        data.push({
+            id: n.uid,
+            date_modified: n.date_modified,
+            title: await decryptText(n.rtitle, aesKey),
+            tags: await decryptText(n.rtags, aesKey),
+            text: await decryptText(n.content, aesKey)
+        });
+    }
+    document.getElementById('exportTextArea').value = JSON.stringify(data, null, 2); // заполним textarea
+    exportCopied = false;
+
+    // очистка
+    cleanupRestore();
+    switchTo('exportArea');
+}
+
+function cleanupRestore() {
+    restoreContent = '';
+    updateElements([
+        [['doRestoreBtn', 'doDecryptBtn'], 'disabled', true],
+        [['doRestoreBtn'], 'classList', 'actionBtn', 'remove'],
+        ['backupInfo', 'textContent', 'файл бекапа не выбран'],
+    ]);
+}
+
+// === Restore backup process
+document.getElementById('doRestoreBtn').onclick = async (e) => {
+    e.preventDefault();
+    if (!isLoggedIn || !login) {
+        alert(messagePleaseLoginFirst);
+        return;
+    }
+    if (restoreContent === '' || !restoreContent.signature || !Array.isArray(restoreContent.content || restoreContent.content.length === 0)) {
+        alert('Сначала выберите файл бекапа для восстановления!');
+        return;
+    }
+
+    if (!confirm('Восстановление бекапа\n\nВосстановление бекапа сначала УДАЛИТ все ваши текущие данные, а затем загрузит на сервер данные из архива\n\nХотите продолжить?')) {
+        return;
+    }
+
+    const b64content = base64encode(JSON.stringify(restoreContent.content));
+    const res = await sendRequest('restore', {
+        content: b64content,
+        backup_sign: restoreContent.signature
+    }, apiUrl, login, secretKey);
+    if (res && typeof res === 'object' && res.ok === true) {
+        alert(`Восстановлено записей (${res.rows} шт.) выполнено`);
+        document.getElementById('closeRestoreBtn').click();
+    } else {
+        showError('Восстановление бекапа', res);
+    }
+}
+
+// === Import data show form ===
+document.getElementById('importBtn').onclick = async (e) => {
+    e.preventDefault();
+    if (!isLoggedIn || !login) {
+        alert(messagePleaseLoginFirst);
+        return;
+    }
+    switchTo("importArea");
+}
+
+// === Import file load
+document.getElementById('fileInput').addEventListener('change', async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    document.getElementById('importTextArea').value = await file.text();
+});
+
+// === Import data process
+document.getElementById('doImportBtn').onclick = async (e) => {
+    e.preventDefault();
+    if (!isLoggedIn || !login) {
+        alert(messagePleaseLoginFirst);
+        return;
+    }
+    const jsonStr = document.getElementById('importTextArea').value || '';
+    if (jsonStr === '') {
+        alert('Загрузите ваши данные JSON для импорта');
+        return;
+    }
+    let arr = [];
+    // Преобразуем строку в объект
+    try {
+        arr = JSON.parse(jsonStr);
+    } catch (err) {
+        console.error('json parse error:', err);
+        alert('Не удалось разобрать данные JSON. Проверьте целостность и корректность данных.');
+        return;
+    }
+
+    let importedRecords = 0;
+    let errorRecords = 0;
+    const totalRecords = arr.length;
+    if (!confirm('Найдено записей: ' + totalRecords + 'шт. \n\nОни будут добавлены к вашим записям\n\nХотите продолжить?')) {
+        return;
+    }
+
+    const results = document.getElementById('importLog');
+    results.classList.remove('hidden');
+
+    results.textContent = `Всего записей: ${totalRecords}\n\nНачинаем импорт:\n`;
+    let i = 0;
+
+    for (const item of arr) {
+        i++;
+
+        item.tags = item.tags.replace(/[\s,]+$/, ""); // trim для тегов, удалим лишнюю запятую в конце если есть
+
+        // Кодируем данные
+        const encTitle = await ENC.encodeForIndex(item.title);
+        const encTags = await ENC.encodeForIndex(item.tags);
+        const rEncText = await encryptText(item.text, aesKey);
+        const rEncTitle = await encryptText(item.title, aesKey);
+        const rEncTags = await encryptText(item.tags, aesKey);
+        const operation = 'add';
+        const id = '';
+
+        // Отправляем запрос на сервер
+        const res = await sendRequest(operation, {
+                id,
+                title: encTitle,
+                tags: encTags,
+                text: rEncText,
+                rtitle: rEncTitle,
+                rtags: rEncTags
+            },
+            apiUrl,
+            login,
+            secretKey);
+        if (res.ok && res.id) {
+            results.textContent = results.textContent + `${i}. ID: ${res.id} - ${item.title}\n`;
+            importedRecords++;
+        } else {
+            results.textContent = results.textContent + `${i}. ERROR! - ${item.title}\n`;
+            errorRecords++;
+            showError("Импорт:", res);
+        }
+    }
+    results.textContent = results.textContent + `Импорт завершен\n\nУспешно: ${importedRecords} из ${totalRecords}\nОшибок: ${errorRecords}\n\n`;
+    localStorageSet('dataChanged_' + login.slice(-3), 'true'); // для предупреждения о бекапе
+}
+
+// === Import data Close button
+document.getElementById('closeImportBtn').onclick = (e) => {
+    e.preventDefault();
+    updateElements([
+        ['importTextArea', 'value', ''], // очистка формы
+        ['importLog', 'textContent', ''],
+        ['importLog', 'classList', 'hidden', 'add'],
+    ]);
+    switchTo(['loginArea', 'settingsArea', 'actionsArea']);
+}
+
+document.getElementById('pasteImportBtn')?.addEventListener('click', async () => {
+    const textarea = document.getElementById('importTextArea');
+    if (!textarea) return;
+    try {
+        textarea.value = await navigator.clipboard.readText();
+    } catch (err) {
+        console.error('Не удалось вставить из буфера обмена:', err);
+    }
+});
+
+// Backup data
+document.getElementById('backupBtn').onclick = async (e) => {
+    e.preventDefault();
+    if (!isLoggedIn || !login) {
+        alert(messagePleaseLoginFirst);
+        return;
+    }
+    if (confirm('Резервное копирование\n\nВаши данные будут сохранены с сервера в зашифрованном виде, одним файлом.\n\nЭтот файл можно использовать как резервную копию для восстановления данных в будущем, а так же расшифровать и экспортировать как текст (JSON)\n\nХотите создать бекап?')) {
+        /**
+         * @typedef {Object} backupResponse
+         * @property {string} filecontent
+         * @property {boolean} ok
+         * @property {string} filename
+         */
+
+        /** @type {backupResponse} */
+        const res = await sendRequest('backup', {}, apiUrl, login, secretKey);
+        if (res && typeof res === 'object' && res.ok === true) {
+
+            // Проверка целостности данных в бекапе
+            const u8 = new Uint8Array([...atob(res.filecontent)].map(c => c.charCodeAt(0)));
+            let text = await ungzip(u8);
+            try {
+                text = JSON.parse(text);
+            } catch (e) {
+                console.warn('Invalid JSON:', text.slice(0, 300) + '...');
+                alert('Ошибка обработки, не валидный JSON в бекапе данных!');
+                resetPasswdBtn();
+                return;
+            }
+            const backupCount = res.count; // Записей в бекапе по ответу сервера
+            let okCount = 0;
+            let errorCount = 0;
+            for (const n of text.content) {
+                // Расшифровка полученных данных
+                const title = await decryptText(n.rtitle, aesKey);
+                const tags = await decryptText(n.rtags, aesKey);
+                const text = await decryptText(n.content, aesKey);
+                const strings = [title, tags, text];
+                const errors = ['[Corrupted data]', '[Corrupted data / invalid key]'];
+                if (strings.some(s => errors.includes(s))) {
+                    errorCount++; // Увеличиваем счетчик ошибок
+                } else {
+                    okCount++; // Увеличиваем счетчик ОК
+                }
+            }
+            if (errorCount > 0) {
+                alert(`Внимание!\n\nВ бекапе обнаружены поврежденные записи: ${errorCount} шт.`);
+            }
+            const backupCountReal = okCount + errorCount;
+            if (backupCount !== backupCountReal) {
+                alert(`внимание!\n\nОбнаружено несоответствие количества записей в бекапе!\n\nДолжно быть ${backupCount} шт, по факту ${backupCountReal} шт.`);
+            }
+
+            const uint8 = new Uint8Array([...atob(res.filecontent)].map(c => c.charCodeAt(0)));
+            const blob = new Blob(
+                [uint8],
+                {type: "application/gzip"}
+            );
+
+            // создаём временную ссылку на этот blob
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = res.filename;
+
+            // "нажимаем" ссылку программно для инициации сохранения файла браузером
+            document.body.appendChild(a);
+            a.click();
+
+            // очищаем за собой
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            // Записываем дату создания последнего бекапа в localStorage
+            const now = new Date().toISOString();
+            const suffix = login.slice(-3);
+            localStorageSet('lastBackupDate_' + suffix, now);
+            localStorageSet('lastWarningDate_' + suffix, now);
+            localStorageRemove('dataChanged_' + suffix);
+            if (debugIsOn) console.log('Дата последнего бэкапа сохранена в localStorage:', now);
+        } else {
+            showError('Backup', res);
+        }
+    }
+}
+
+let exportCopied = false; // флаг, что пользователь скопировал данные экспорта
+
+// === Export data ===
+document.getElementById('exportBtn').onclick = async (e) => {
+    e.preventDefault();
+    if (!isLoggedIn || !login) {
+        alert(messagePleaseLoginFirst);
+        return;
+    }
+    if (confirm('Экспорт данных\n\nВсе ваши заметки будут загружены с сервера, расшифрованы и сохранены в JSON (текстовом) формате\n\nЕсли вы хотите создать безопасную резервную копию данных - вместо "экспорта" нажмите "Скачать бекап" .\n\nХотите продолжить экспорт?')) {
+        const out = document.getElementById('exportTextArea');
+        if (!out) {
+            alert('Ошибка - не могу найти exportTextArea для вывода результатов');
+            return;
+        }
+
+        /**
+         * @typedef {Object} exportResponse
+         * @property {{title: string, text: string, tags: string, date_modified: string}} results
+         * @property {boolean} ok
+         * @property {number} count
+         */
+
+        /** @type {exportResponse} */
+        const res = await sendRequest('export', {}, apiUrl, login, secretKey);
+        if (res && typeof res === 'object' && res.ok === true) {
+            if (!res.results || !res.results.length || !res.count) {
+                alert('Ни одной записи для экспорта не найдено');
+                return;
+            }
+            const data = [];
+            for (const n of res.results) {
+                data.push({
+                    id: n.id,
+                    date_modified: n.date_modified,
+                    title: await decryptText(n.title, aesKey),
+                    tags: await decryptText(n.tags, aesKey),
+                    text: await decryptText(n.text, aesKey)
+                });
+            }
+            out.value = JSON.stringify(data, null, 2); // заполним textarea
+            exportCopied = false;
+        } else {
+            showError('Экспорт данных', res);
+        }
+        switchTo("exportArea");
+    }
+}
+
+// === Export data Close button
+document.getElementById('closeExportBtn').onclick = (e) => {
+    e.preventDefault();
+    if (exportCopied || confirm('Вы скопировали / сохранили данные?')) {
+        document.getElementById('exportTextArea').value = ''; // очистка формы
+        switchTo(['loginArea', 'settingsArea', 'actionsArea']);
+    }
+}
+
+// === Export data Copy button
+document.getElementById('copyExportBtn')?.addEventListener('click', () => {
+    const txt = document.getElementById('exportTextArea')?.value || '';
+    const res = navigator.clipboard.writeText(txt);
+    if(res) {
+        alert('Скопировано\n\nСохраните данные (например в TXT файл) для дальнейшего использования');
+    }
+    exportCopied = true;
+});
+
+// Export data Save button
+document.getElementById('saveExportBtn').addEventListener('click', () => {
+    const text = document.getElementById('exportTextArea').value || '';
+    const filename = 'export_data.txt';
+
+    // создаём Blob (объект файла)
+    const blob = new Blob([text], {type: 'text/plain;charset=utf-8'});
+
+    // создаём временную ссылку на этот blob
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+
+    // «нажимаем» ссылку программно
+    document.body.appendChild(a);
+    a.click();
+    exportCopied = true;
+
+    // очищаем за собой
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+});
+
+// === Логин ===
+document.getElementById('loginForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    let passphrase = document.getElementById('passphrase').value;
+    if (!passphrase) {
+        alert('Секретная фраза не найдена!');
+        return;
+    }
+    await doLogin(passphrase);
+});
+
+// === Поиск ===
+document.getElementById('searchForm').addEventListener('submit', async e => {
+    e.preventDefault();
+
+    const query = document.getElementById('searchQuery').value.replace(/[\s,]+$/, ""); // Удалим запятую в конце
+    if (!query) return;
+
+    if (/#\d{1,5}/i.test(query)) {
+        // Пользователь ввел идентификатор записи, откроем сразу заметку
+        document.getElementById('searchQuery').value = '';
+        await viewNote(query.slice(1));
+        return;
+    }
+
+    document.getElementById('searchQuery').blur();
+
+    const normalizedQuery = String(query).toLowerCase();
+    const allWords = ['все', 'всё', 'all', 'dct'];
+    const encQuery = (allWords.includes(normalizedQuery)) ? "ALL" : await ENC.encodeForIndex(query);
+    const res = await sendRequest('search', {query: encQuery}, apiUrl, login, secretKey);
+    if (res && typeof res === 'object' && res.ok === true) {
+        await showResults(res);
+    } else {
+        showError('search', res);
+    }
+});
+
+
+async function doLogin(passphrase, doNotSave = false) {
+    // Проверка комплексности парольной фразы
+    let minScore = 80;
+    if (!unsafePassphrase && scorePassphrase < 80) {
+        switchTo(['loginArea', 'settingsArea']);
+        alert(`Сложность пароля слишком низкая - ${scorePassphrase}%, должно быть минимум ${minScore}%!\n\nЕсли вы хотите использовать слабые небезопасные пароли - отключите проверку в настройках\n\nРекомендации:\n- длинна - 15 и более символов\n- наличие букв разного регистра\n- наличие цифр\n- наличие спецсимволов (/.?!:&;#@*> и т.д.)\n- не менее 5 уникальных (разных) букв`);
+        return false;
+    }
+
+    apiUrl = selectApiServer.value;
+
+    // Покажем название сервера
+    const serverName = document.getElementById('server-name');
+    serverName.textContent = selectApiServer.selectedOptions[0].text;
+    const serverType = selectApiServer.options[selectApiServer.selectedIndex].getAttribute('data-type');
+    if (serverType !== 'master') {
+        serverName.classList.add('slave-server');
+    } else {
+        serverName.classList.remove('slave-server');
+    }
+
+    [login, secretKey, aesKey, ENC] = await genKeys(passphrase); // установка глобальных переменных
+
+    // Отладка
+    if (debugIsOn) {
+        const debug = document.getElementById('debug');
+        debug.textContent = '';
+        debug.textContent += `Login: ${login}\nSecret_key: ${secretKey}\n`;
+    }
+
+    // логин
+    /**
+     * @typedef {Object} LoginResponse
+     * @property {boolean} ok
+     * @property {number} records
+     * @property {string} error
+     * @property {number} signup
+     * @property {string} v
+     * @property {string} welcome_message
+     * @property {number} max_input
+     */
+
+    /** @type {LoginResponse} */
+    const res = await sendRequest('login', {}, apiUrl, login, secretKey);
+
+    if (res && typeof res === 'object' && res.ok === true && res.v !== required_api_version) {
+        alert(`Внимание: версия API (${res.v}) отличается от рекомендуемой (${required_api_version})!\n\nВозможны ошибки в работе`);
+    }
+
+    const lastServerUsed = sessionStorageGet('lastServerUsed');
+    if (res.welcome_message && lastServerUsed !== apiUrl) {
+        alert(res.welcome_message);
+    }
+    sessionStorageSet('lastServerUsed', apiUrl);
+
+    if (res && typeof res === 'object' && res.ok === true) {
+        if (debugIsOn) console.log(`Вход выполнен на ${apiUrl} как ${login}, записей в базе: ${res.records}`);
+
+    } else if (res && typeof res === 'object' && res.error === 'user_not_registered') {
+        if (res.signup === 1) {
+            if (!await doSignup(apiUrl, login, secretKey)) {
+                switchTo(['loginArea', 'settingsArea']);
+                return false;
+            }
+        } else {
+            // Пользователь не зарегистрирован, регистрация не разрешена
+            alert(`Такой пользователь не зарегистрирован на сервере и сервер не разрешает новые регистрации\n\nДля регистрации сообщите администратору ваши\n- ID: ${login}\n- SecretKey: ${secretKey}\n\n(можно скопировать из данных отладки)`);
+            if (debugIsOn) console.warn(`Пользователь ${login} с ключом ${secretKey} не существует на сервере ${apiUrl}. Регистрация не доступна.`);
+            switchTo(['loginArea', 'settingsArea']);
+            return false;
+        }
+
+    } else {
+        showError("Login error", res);
+        switchTo(['loginArea', 'settingsArea']);
+        return false;
+    }
+
+    // Обновим максимальный размер запроса, если север его сообщает
+    if (res.max_input) {
+        serverMaxInput = res.max_input;
+    }
+
+    isLoggedIn = true; // установим флаг успешного логина
+
+    // Сохраним введенную секретную фразу
+    sessionStorageSet('passphrase', passphrase); // для сессии
+    if (settingSavePassphrase === '1' && !doNotSave) {
+        sessionStorageSet('passphrase', passphrase); // сохраняем в сессию
+        let bioKey;
+        try {
+            console.log('doLogin: Шифруем и сохраняем passphrase в localStorage');
+            bioKey = await getBioKey();
+
+        } catch (e) {
+            console.error('doLogin -> getBioKey: ' + e);
+            console.error('doLogin: не удалось получить bioKey и зашифровать фразу для localStorage!')
+        }
+
+        if (bioKey) {
+            const aesKey = await crypto.subtle.importKey("raw", bioKey, "AES-GCM", false, ["encrypt", "decrypt"]);
+            let encryptedPassphrase = await encryptText(passphrase, aesKey);
+            localStorageSet('encData', encryptedPassphrase);
+            console.log('doLogin: записали зашифрованную фразу в encData в localStorage');
+        }
+    }
+
+    // проверим и покажем предложение создать бекап, если есть данные
+    if (res.records > 0) {
+        await checkBackupDate();
+    }
+
+    // Изменения в интерфейсе после инициализации и логина
+    updateElements([
+        [['passwdBtn', 'exportBtn', 'backupBtn', 'restoreBtn', 'importBtn', 'terminateAccountBtn'], 'disabled', false],
+        ['btnLogout', 'classList', 'hidden', 'remove'],
+        ['searchQuery', 'value', ''] // очистка поля поиска
+    ]);
+
+    let lastSwitch = sessionStorageGet('lastSwitch');
+    let lastViewID = sessionStorageGet('lastViewID');
+    let lastEditID = sessionStorageGet('lastEditID');
+
+    switchTo(['searchArea', 'loginInfo']);
+    document.getElementById('searchQuery').focus();
+
+    // Восстановим последнее действие, если оно было
+    if (lastSwitch === 'viewArea' && lastViewID) {
+        // откроем заново просмотр заметки
+        await viewNote(lastViewID);
+    } else if (lastSwitch === 'editArea' && lastEditID) {
+        // откроем заново форму редактирования
+        await viewNote(lastEditID);
+        document.getElementById('btnActionEdit').click();
+    }
+}
+
+async function showResults(res) {
+    const container = document.getElementById('searchResultsList');
+    container.classList.remove('hidden'); // покажем область результатов поиска
+    container.innerHTML = '';
+
+    if (!res || typeof res !== 'object' || !res.results || !res.results.length) {
+        const empty = document.createElement('i');
+        empty.textContent = 'Ничего не найдено';
+        container.appendChild(empty);
+        return;
+    }
+
+    // есть результаты поиска
+    container.innerHTML = "<div class='align-right'><a href='#' id='clearResultLink'>Очистить результаты <svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"currentColor\"><path d=\"M2.344 2.343h-.001a8 8 0 0 1 11.314 11.314A8.002 8.002 0 0 1 .234 10.089a8 8 0 0 1 2.11-7.746Zm1.06 10.253a6.5 6.5 0 1 0 9.108-9.275 6.5 6.5 0 0 0-9.108 9.275ZM6.03 4.97 8 6.94l1.97-1.97a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l1.97 1.97a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L8 9.06l-1.97 1.97a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734L6.94 8 4.97 6.03a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018Z\"></path></svg></a></div>";
+    const clearResultLink = document.getElementById('clearResultLink');
+    if (clearResultLink) {
+        clearResultLink.addEventListener('click', (event) => {
+            event.preventDefault();
+            document.getElementById('searchQuery').value = '';
+            document.getElementById('searchQuery').focus();
+            container.innerHTML = '';
+            container.classList.add('hidden');
+        });
+    }
+
+    for (const n of res.results) {
+        const div = document.createElement('div');
+        div.className = 'note';
+        div.id = `note${n.id}`;
+        const title = await decryptText(n.title, aesKey);
+        const linkOpen = document.createElement('a');
+        linkOpen.href = '#';
+        linkOpen.className = 'action-link';
+        linkOpen.textContent = title;
+        linkOpen.addEventListener('click', (e) => {
+            e.preventDefault();
+            viewNote(n.id);
+        });
+        div.append(linkOpen);
+        container.appendChild(div);
+    }
+}
+
+// === Добавление ===
+document.getElementById('btnNew').onclick = () => {
+    updateElements([
+        [['editId', 'editTitleInput', 'editTagsInput', 'editTextInput'], 'value', ''],
+        ['editTextInput', 'defaultValue', ''],
+        ['editTitle', 'textContent', 'Новая запись']
+    ]);
+    makeWysiwyg('editTextInput');
+    switchTo('editArea');
+    document.getElementById('editTitleInput').focus();
+};
+
+// ==== Нажата кнопка Отмена на странице редактирования
+document.getElementById('btnCancelEdit').onclick = () => {
+    document.getElementById('editForm').reset(); // отмена изменений в текст
+    const id = document.getElementById('editId').value;
+    if (id) {
+        sessionStorageRemove('lastEditID');
+        switchTo('viewArea');
+        sessionStorageSet('lastViewID', id);
+    } else {
+        switchTo(['searchArea', 'loginInfo']);
+        if (!document.getElementById('searchQuery').value) {
+            document.getElementById('searchQuery').focus();
+        }
+    }
+};
+
+// Обработка отправка формы добавления / редактирования записи
+document.getElementById('editForm').onsubmit = async e => {
+    e.preventDefault();
+    if (debugIsOn) console.log('submit form to server');
+    const id = document.getElementById('editId').value;
+    const title = document.getElementById('editTitleInput').value;
+    let tags = document.getElementById('editTagsInput').value;
+    const text = document.getElementById('editTextInput').value;
+
+    tags = tags.replace(/[\s,]+$/, ""); // trim для тегов, удалим лишнюю запятую в конце если есть
+
+    // Проверка, заполнены ли все поля
+    if (!title || !tags || !text) {
+        alert('Все поля должны быть заполнены!');
+        return;
+    }
+
+    // Кодируем данные
+    const encTitle = await ENC.encodeForIndex(title);
+    const encTags = await ENC.encodeForIndex(expandTags(tags));
+    const rEncText = await encryptText(text, aesKey);
+    const rEncTitle = await encryptText(title, aesKey);
+    const rEncTags = await encryptText(tags, aesKey);
+    const operation = id ? 'modify' : 'add';
+
+    // Отправляем запрос на сервер
+    const res = await sendRequest(operation, {
+            id,
+            title: encTitle,
+            tags: encTags,
+            text: rEncText,
+            rtitle: rEncTitle,
+            rtags: rEncTags
+        },
+        apiUrl,
+        login,
+        secretKey);
+    if (res && typeof res === 'object' && res.ok === true && res.id) {
+        localStorageSet('dataChanged_' + login.slice(-3), 'true'); // для предупреждения о бекапе
+        // Изменения в форму добавления
+        sessionStorageRemove('lastEditID');
+        await viewNote(res.id);
+        return;
+    }
+    showError(operation, res);
+};
+
+// === Удаление ===
+async function deleteNote(id) {
+    if (!confirm("Удалить запись " + id + "?")) return;
+    const res = await sendRequest('delete', {id}, apiUrl, login, secretKey);
+    if (res && typeof res === 'object' && res.ok === true) {
+        switchTo(['searchArea', 'loginInfo']);
+        if (document.getElementById('searchQuery').value) {
+            await document.getElementById('searchBtn').click();
+        } else {
+            document.getElementById('searchQuery').focus();
+        }
+        sessionStorageRemove('lastViewID'); // "Забудем" ID
+    } else {
+        showError('delete', res);
+    }
+}
+
+
+// === Просмотр и форма редактирования ===
+async function viewNote(id) {
+
+    /**
+     * @typedef {Object} GetResponse
+     * @property {{title: string, text: string, tags: string, date_modified: string}} note
+     */
+
+    /** @type {GetResponse} */
+    const res = await sendRequest('get', {id}, apiUrl, login, secretKey);
+    if (res && typeof res === 'object' && res.note && typeof res.note === 'object') {
+
+        let noteDate = (res.note.date_modified) ? formatDate(res.note.date_modified, 'd.m.y H:i') : '';
+        let noteContent = (res.note.content) ? await decryptText(res.note.content, aesKey) : '';
+        let noteTitle = (res.note.rtitle) ? await decryptText(res.note.rtitle, aesKey) : '';
+        let noteTags = (res.note.rtags) ? await decryptText(res.note.rtags, aesKey) : '';
+
+        // Обработка текста
+        let noteContentView = bbcodeToHtml(noteContent);
+
+        // Заполняем форму редактирования
+        document.getElementById('editTitle').textContent = `Редактирование записи ${id}`;
+        document.getElementById('editId').defaultValue = id;
+        document.getElementById('editTitleInput').defaultValue = noteTitle;
+        document.getElementById('editTagsInput').defaultValue = noteTags;
+        document.getElementById('editTextInput').defaultValue = noteContent;
+        document.getElementById('editId').value = id;
+        document.getElementById('editTitleInput').value = noteTitle;
+        document.getElementById('editTagsInput').value = noteTags;
+        document.getElementById('editTextInput').value = noteContent;
+
+        // Заполняем форму просмотра
+        document.getElementById('viewTitle').textContent = noteTitle;
+        document.getElementById('viewContent').innerHTML = noteContentView;
+        document.getElementById('viewDate').textContent = noteDate + ', ID #' + id;
+        document.getElementById('viewTags').innerHTML = formatTags(noteTags, 'tag-label');
+
+        // Кнопка закрытия
+        document.getElementById('btnActionClose').onclick = () => {
+            // очистим форму просмотра и редактирования
+            updateElements([
+                [['editId', 'editTitleInput', 'editTagsInput', 'editTextInput'], 'value', ''],
+                [['editId', 'editTitleInput', 'editTagsInput', 'editTextInput'], 'defaultValue', ''],
+                [['editTitle', 'viewTitle', 'viewContent', 'viewTags'], 'textContent', '']
+            ]);
+            // обновляем результаты поиска
+            switchTo(['searchArea', 'loginInfo']);
+            if (document.getElementById('searchQuery').value) {
+                document.getElementById('searchBtn').click();
+            } else {
+                document.getElementById('searchQuery').focus();
+            }
+            sessionStorageRemove('lastViewID'); // "Забудем" ID
+        }
+
+        // Кнопка редактирования
+        document.getElementById('btnActionEdit').onclick = () => {
+            makeWysiwyg('editTextInput');
+            switchTo('editArea');
+            document.getElementById('editTitleInput').focus();
+            sessionStorageRemove('lastViewID'); // "Забудем" ID
+            sessionStorageSet('lastEditID', id);
+        }
+
+        // Кнопка удаления
+        document.getElementById('btnActionDelete').onclick = () => deleteNote(id);
+
+        // Активируем обработчик внутренних ссылок
+        initInternalLinks();
+        // Показываем форму просмотра
+        switchTo('viewArea');
+
+        // Сохраним id заметки на случай перезагрузки страницы
+        sessionStorageSet('lastViewID', id);
+
+    } else {
+        showError('get', res);
+    }
+
+}
+
+function switchTo(activeIds) {
+    if (debugIsOn) console.log('switchTo ' + activeIds);
+    // Список всех id, с которыми работает функция
+    const ids = ["viewArea", "searchArea", "editArea", "loginArea", "helpArea", "actionsArea", "settingsArea", "exportArea", "importArea", "loginInfo", "passwdArea", "textArea", "restoreArea"];
+
+    // Преобразуем параметр в массив, если это не массив
+    const activeList = Array.isArray(activeIds) ? activeIds : [activeIds];
+
+    // Пройтись по списку и скрыть все элементы
+    ids.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            // Если этот id присутствует в списке активных — показываем, иначе скрываем
+            if (activeList.includes(id)) {
+                el.classList.remove('hidden');
+            } else {
+                el.classList.add('hidden');
+            }
+        }
+    });
+
+    activeArea = activeList[0] || ''; // установим флаг какая область сейчас активна
+
+    // Запомнить последние активные области
+    sessionStorageSet('lastSwitch', activeList[0] || '');
+}
+
 function bytesToHex(buf) {
     return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -311,7 +1906,7 @@ async function encryptText(plaintext, key) {
     const textBytes = enc.encode(plaintext);
     const chunks = [];
 
-    // Разбиваем на чанки
+    // Разбиваем на части
     for (let offset = 0; offset < textBytes.length; offset += CHUNK_SIZE) {
         const part = textBytes.subarray(offset, offset + CHUNK_SIZE);
         const iv = await crypto.getRandomValues(new Uint8Array(IV_SIZE));
@@ -413,9 +2008,9 @@ async function makeSignature(operation, timestamp, data, myLogin = '', mySecretK
     }
 
     let base = `${myLogin}:${timestamp}:${operation}:${mySecretKey}${extra}`;
-    let mySign = await sha256(base);
+    //let mySign = await sha256(base);
     //if (debugIsOn === true) document.getElementById('debug').textContent += "\nmakeSignature => " + base + " " + mySign + "\n";
-    return mySign;
+    return sha256(base);
 }
 
 // === AJAX ===
@@ -483,6 +2078,8 @@ function bbcodeToHtml(input) {
     // 3. Замены PHPBB тегов
     // noinspection HtmlUnknownTarget,HtmlUnknownAnchorTarget
     const replacements = [
+        {re: /\[h3](.*?)\[\/h3]/gis, to: "<h3>$1</h3>"},
+        {re: /\[h4](.*?)\[\/h4]/gis, to: "<h4>$1</h4>"},
         {re: /\[b](.*?)\[\/b]/gis, to: "<b>$1</b>"},
         {re: /\[i](.*?)\[\/i]/gis, to: "<i>$1</i>"},
         {re: /\[u](.*?)\[\/u]/gis, to: "<u>$1</u>"},
@@ -493,12 +2090,14 @@ function bbcodeToHtml(input) {
         {re: /\[li](.*?)\[\/li]/gis, to: "<li>$1</li>"},
         {re: /\[code](.*?)\[\/code]/gis, to: "<code>$1</code>"},
         {re: /\[quote](.*?)\[\/quote]/gis, to: "<pre>$1</pre>"},
+        {re: /\[justify](.*?)\[\/justify]/gis, to: "<div class='align-justify'>$1</div>"},
+        {re: /\[center](.*?)\[\/center]/gis, to: "<div class='align-center'>$1</div>"},
         {
             re: /\[url=#([0-9]+)](.*?)\[\/url]/gis,
             to: '<a href="#$1" data-id="$1" class="internal-link">$2</a>'
         },
         {
-            re: /\[url=https:\/\/(www.dropbox.com|1drv.ms|drive.google.com|cloud.mail.ru)([^\]#]+)](.*?)\[\/url]/gis,
+            re: /\[url=https:\/\/(www\.dropbox\.com|1drv\.ms|drive\.google\.com|cloud\.mail\.ru)([^\]#]+)](.*?)\[\/url]/gis,
             to: '<a href="https://$1$2" class="link-with-icon" target="_blank" rel="noopener noreferrer">$3</a>'
         },
         {
@@ -708,7 +2307,7 @@ function initTagAutocomplete(inputId) {
     inputElem.addEventListener('blur', () => setTimeout(() => suggestionBox.style.display = 'none', 150));
     window.addEventListener('resize', positionBox);
 
-    // Убираем подсказки при сабмите формы
+    // Убираем подсказки при отправке формы
     inputElem.form?.addEventListener('submit', () => {
         suggestionBox.style.display = 'none';
         suggestionBox.innerHTML = '';
@@ -716,7 +2315,7 @@ function initTagAutocomplete(inputId) {
 }
 
 /**
- * Прокручивает автокомплит, чтобы активный элемент был видимым
+ * Прокручивает список, чтобы активный элемент был видимым
  * @param {string} inputId - ID input'а (для поиска .autocomplete-box)
  */
 // В main.js, обновите scrollToActive с логами
@@ -767,17 +2366,6 @@ function formatTags(tagsString, myClass = 'tag-label') {
 
     // Формируем HTML
     return tags.map(tag => `<span class="${myClass}">${tag}</span>`).join("");
-}
-
-function formatMySQLDate(date_m) {
-    if (!date_m) return '';
-    const d = new Date(date_m);
-
-    return new Intl.DateTimeFormat('ru-RU', {
-        day: '2-digit',
-        month: 'long',
-        year: 'numeric'
-    }).format(d);
 }
 
 function formatDate(strDateTime, format) {
@@ -831,15 +2419,26 @@ function makeWysiwyg(id) {
     toolbar.className = 'wysiwyg-toolbar';
     const buttons = [
         {label: '<b>B</b>', tag: 'b'},
-        {label: '<i>I</i>', tag: 'i'},
+        {label: '<em>i</em>', tag: 'i'},
         {label: '<u>U</u>', tag: 'u'},
         {label: '<s>S</s>', tag: 's'},
-        {label: '🔢', tag: 'olblock'},
-        {label: '⊡', tag: 'ulblock'},
-        {label: '🔗', tag: 'url'},
+        {label: '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" class="rotate90">\n' +
+                '  <path d="M10.896 2H8.75V.75a.75.75 0 0 0-1.5 0V2H5.104a.25.25 0 0 0-.177.427l2.896 2.896a.25.25 0 0 0 .354 0l2.896-2.896A.25.25 0 0 0 10.896 2ZM8.75 15.25a.75.75 0 0 1-1.5 0V14H5.104a.25.25 0 0 1-.177-.427l2.896-2.896a.25.25 0 0 1 .354 0l2.896 2.896a.25.25 0 0 1-.177.427H8.75v1.25Zm-6.5-6.5a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5ZM6 8a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1 0-1.5h.5A.75.75 0 0 1 6 8Zm2.25.75a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5ZM12 8a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1 0-1.5h.5A.75.75 0 0 1 12 8Zm2.25.75a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5Z"></path>\n' +
+                '</svg>', tag: 'center'},
+        {label: '<svg aria-hidden="true" height="16" viewBox="0 0 16 16" width="16" data-view-component="true" class="octicon octicon-list-ordered">\n' +
+                '    <path d="M5 3.25a.75.75 0 0 1 .75-.75h8.5a.75.75 0 0 1 0 1.5h-8.5A.75.75 0 0 1 5 3.25Zm0 5a.75.75 0 0 1 .75-.75h8.5a.75.75 0 0 1 0 1.5h-8.5A.75.75 0 0 1 5 8.25Zm0 5a.75.75 0 0 1 .75-.75h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1-.75-.75ZM.924 10.32a.5.5 0 0 1-.851-.525l.001-.001.001-.002.002-.004.007-.011c.097-.144.215-.273.348-.384.228-.19.588-.392 1.068-.392.468 0 .858.181 1.126.484.259.294.377.673.377 1.038 0 .987-.686 1.495-1.156 1.845l-.047.035c-.303.225-.522.4-.654.597h1.357a.5.5 0 0 1 0 1H.5a.5.5 0 0 1-.5-.5c0-1.005.692-1.52 1.167-1.875l.035-.025c.531-.396.8-.625.8-1.078a.57.57 0 0 0-.128-.376C1.806 10.068 1.695 10 1.5 10a.658.658 0 0 0-.429.163.835.835 0 0 0-.144.153ZM2.003 2.5V6h.503a.5.5 0 0 1 0 1H.5a.5.5 0 0 1 0-1h.503V3.308l-.28.14a.5.5 0 0 1-.446-.895l1.003-.5a.5.5 0 0 1 .723.447Z"></path>\n' +
+                '</svg>', tag: 'olblock'},
+        {label: '<svg aria-hidden="true" height="16" viewBox="0 0 16 16" width="16" data-view-component="true" class="octicon octicon-list-unordered">\n' +
+                '    <path d="M5.75 2.5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5Zm0 5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5Zm0 5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5ZM2 14a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm1-6a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM2 4a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path>\n' +
+                '</svg>', tag: 'ulblock'},
+        {label: '<svg aria-hidden="true" height="16" viewBox="0 0 16 16" width="16" data-view-component="true" class="octicon octicon-link">\n' +
+                '    <path d="m7.775 3.275 1.25-1.25a3.5 3.5 0 1 1 4.95 4.95l-2.5 2.5a3.5 3.5 0 0 1-4.95 0 .751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018 1.998 1.998 0 0 0 2.83 0l2.5-2.5a2.002 2.002 0 0 0-2.83-2.83l-1.25 1.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042Zm-4.69 9.64a1.998 1.998 0 0 0 2.83 0l1.25-1.25a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042l-1.25 1.25a3.5 3.5 0 1 1-4.95-4.95l2.5-2.5a3.5 3.5 0 0 1 4.95 0 .751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018 1.998 1.998 0 0 0-2.83 0l-2.5 2.5a1.998 1.998 0 0 0 0 2.83Z"></path>\n' +
+                '</svg>', tag: 'url'},
         {label: '―', tag: 'hr', single: 'true'},
         {label: '#', tag: 'code'},
         {label: '❏️', tag: 'quote'},
+        {label: 'H3', tag: 'h3'},
+        {label: 'H4', tag: 'h4'},
         {label: '⌘', mode: 'source'}
     ];
 
@@ -888,10 +2487,6 @@ function makeWysiwyg(id) {
             if (sourceMode) {
                 // === в текстовый режим ===
                 const html = editable.innerHTML
-                    .replace(/<div><br><\/div>/g, '\n')
-                    .replace(/<div>/g, '\n')
-                    .replace(/<\/div>/g, '')
-                    .replace(/<br\s*\/?>/gi, '\n');
                 textarea.value = bbFromHtml(html);
                 editable.classList.add('hidden');
                 textarea.classList.remove('hidden');
@@ -1181,11 +2776,15 @@ function makeWysiwyg(id) {
             .replace(/\r\n?/g, '\n')
             .replace(/\[url=(.*?)](.*?)\[\/url]/gi, '<a href="$1" target="_blank">$2</a>')
             .replace(/\[link=(.*?)](.*?)\[\/link]/gi, '<a href="$1" target="_blank">$2</a>')
+            .replace(/\[justify](.*?)\[\/justify]/gis, '<div class="align-justify">$1</div>')
+            .replace(/\[center](.*?)\[\/center]/gis, '<div class="align-center">$1</div>')
             .replace(/\[quote](.*?)\[\/quote]/gis, '<pre>$1</pre>')
             .replace(/\[code](.*?)\[\/code]/gis, '<code>$1</code>')
             .replace(/\n*\[ol]\n*/gi, '<ol>').replace(/\n*\[\/ol]\n*/gi, '</ol>')
             .replace(/\n*\[ul]\n*/gi, '<ul>').replace(/\n*\[\/ul]\n*/gi, '</ul>')
             .replace(/\[li]/gi, '<li>').replace(/\[\/li]\n?/gi, '</li>')
+            .replace(/\[h3]/gi, '<h3>').replace(/\[\/h3]\n?/gi, '</h3>')
+            .replace(/\[h4]/gi, '<h4>').replace(/\[\/h4]\n?/gi, '</h4>')
             .replace(/\[b]/gi, '<b>').replace(/\[\/b]/gi, '</b>')
             .replace(/\[i]/gi, '<i>').replace(/\[\/i]/gi, '</i>')
             .replace(/\[u]/gi, '<u>').replace(/\[\/u]/gi, '</u>')
@@ -1196,18 +2795,23 @@ function makeWysiwyg(id) {
 
 
     function bbFromHtml(html) {
-        //alert('debug: bbFromHtml '+html);
+        //alert('debug: '+html);
         let out = html
+            .replace(/<div class="align-center">(.*?)<\/div>/gis, '[center]$1[/center]')
+            .replace(/<center>(.*?)<\/center>/gis, '[center]$1[/center]')
+            .replace(/<div class="align-justify">(.*?)<\/div>/gis, '[justify]$1[/justify]')
             .replace(/\r\n?/g, '\n')
-            .replace(/<div><br><\/div>/gi, '\n')
             .replace(/<div>/gi, '\n')
             .replace(/<\/div>/gi, '')
             .replace(/<hr[^>]*>\s*(?:<br\s*\/?>|\n|\r\n?)+/gi, '<hr>')
             .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<div><br><\/div>/gi, '\n')
             .replace(/<ol>/gi, '\n[ol]\n').replace(/<\/ol>/gi, '[/ol]\n\n')
             .replace(/<ul>/gi, '\n[ul]\n').replace(/<\/ul>/gi, '[/ul]\n\n')
             .replace(/<li>/gi, '[li]').replace(/<\/li>/gi, '[/li]\n')
             .replace(/<b>/gi, '[b]').replace(/<\/b>/gi, '[/b]')
+            .replace(/<h3>/gi, '[h3]').replace(/<\/h3>/gi, '[/h3]\n')
+            .replace(/<h4>/gi, '[h4]').replace(/<\/h4>/gi, '[/h4]\n')
             .replace(/<i>/gi, '[i]').replace(/<\/i>/gi, '[/i]')
             .replace(/<u>/gi, '[u]').replace(/<\/u>/gi, '[/u]')
             .replace(/<s>/gi, '[s]').replace(/<\/s>/gi, '[/s]')
@@ -1231,7 +2835,9 @@ function makeWysiwyg(id) {
             .replace(/\r\n?/g, '\n')
             .replace(/\[li]/gi, '[li]').replace(/\[\/li]\n*/gi, '[/li]')
             .replace(/\n?\[ol]\n*/gi, '[ol]').replace(/\n*\[\/ol]\n?/gi, '[/ol]')
-            .replace(/\n?\[ul]\n*/gi, '[ul]').replace(/\n*\[\/ul]\n?/gi, '[/ul]');
+            .replace(/\n?\[ul]\n*/gi, '[ul]').replace(/\n*\[\/ul]\n?/gi, '[/ul]')
+            .replace(/\[h4]/gi, '[h4]').replace(/\[\/h4]\n*/gi, '[/h4]')
+            .replace(/\[h3]/gi, '[h3]').replace(/\[\/h3]\n*/gi, '[/h3]');
     }
 
     // Cинхронизация wysiwyg -> textarea при отправке формы
@@ -1288,6 +2894,7 @@ function showError(prefix, data) {
             if (!data.param) data.param = data.msg;
             error_message = `В вашем запросе отсутствует обязательный параметр: ${data.param}`;
         } else if (data.error === 'too_many_requests') {
+            // noinspection JSUnresolvedReference
             let latter = (data.retry_after) ? `${data.retry_after} сек.` : 'какое-то время';
             error_message = `Количество запросов с вашего IP превышает установленные сервером ограничения.\n\n Пожалуйста, повторите попытку через ${latter}`;
         } else if (data.error === 'bad_signature') {
@@ -1594,15 +3201,6 @@ function base64encode(str) {
     return btoa(binary);
 }
 
-function base64decode(b64) {
-    const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-    }
-    return new TextDecoder().decode(bytes);
-}
-
 /**
  * Проверка даты последнего бэкапа
  */
@@ -1614,7 +3212,9 @@ async function checkBackupDate() {
     if (!dataChanged) {
         return;
     }
+    /** @type {string} */
     const lastBackupDateStr = localStorageGet('lastBackupDate_' + suffix);
+    /** @type {string} */
     const lastWarningDateStr = localStorageGet('lastWarningDate_' + suffix);
     const now = new Date();
     let daysSinceBackup = false;
@@ -1662,7 +3262,7 @@ function evaluatePassphrase(inputId, progressId) {
 
     // 1. Длина
     const length = phrase.length;
-    let lengthScore = 0;
+    let lengthScore;
 
     if (length <= 15) {
         lengthScore = (length / 15) * MAX_LENGTH_BASE;  // 0 → 50%
@@ -1971,6 +3571,7 @@ function updateElements(updates) {
         let targetIds = item[0];
         const path = item[1];
         const value = item[2];
+        /** @type {string} */
         const method = item[3]; // опционально: 'add', 'remove', 'toggle'
 
         // Нормализуем IDs → всегда массив
@@ -2007,11 +3608,14 @@ function updateElements(updates) {
 
                     for (let i = 0; i < parts.length - 1; i++) {
                         current = current[parts[i]];
-                        if (!current) throw new Error(`Путь ${path} прерван`);
+                        if (!current) {
+                            console.warn(`batchUpdate: ошибка при установке ${path} у #${id}`);
+                            return false;
+                        }
                     }
 
                     current[parts[parts.length - 1]] = value;
-                    continue;
+                    //continue;
                 }
 
             } catch (err) {
@@ -2042,7 +3646,7 @@ function isPayloadTooLarge(payload, maxBytes = 4 * 1024 * 1024) {
 function expandTags(text) {
     // Разбиваем по запятым и пробелам — универсально
     const tags = text
-        .split(/\s*,\s*|\s+/)   // разделяем по , или пробелам
+        .split(/\s*,\s*|\s+/)   // разделяем по "," или пробелам
         .map(t => t.trim())
         .filter(Boolean);
 
