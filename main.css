@@ -190,7 +190,7 @@ footer {
         border-bottom: 1px solid #eee;
     }
     .note { border:1px solid #ccc; padding:10px; margin:10px 0;}
-    .description {font-size: 10px;}
+    .description {font-size: 10px; line-height: 1.2;}
     .action-link {
         margin-right: 10px;
         cursor: pointer;
@@ -369,7 +369,7 @@ footer {
     transform-origin: center;
 }
 
-    @media (max-width: 400px) {
+    @media (max-width: 500px) {
         /* body { background: yellow; } */
         .container {
             flex: 1;

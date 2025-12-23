@@ -95,17 +95,16 @@ const checkboxSavePassphrase = document.getElementById('savePassphrase');
     settingSavePassphrase = localStorageGet('savePassphrase');
     checkboxSavePassphrase.checked = (settingSavePassphrase === '1');
 
-    let savedPassphrase = sessionStorageGet('passphrase');
-    // Если в sessionStorage фразы нет - попробуем расшифровать из localStorage, если включено сохранение
-    if (!savedPassphrase && settingSavePassphrase === '1') {
+    let savedPassphrase;
+    // Попробуем расшифровать passphrase из localStorage, если включено сохранение
+    if (settingSavePassphrase === '1') {
         const enc = localStorageGet("encData");
         if (enc) {
             try {
                 /** @type {ArrayBuffer} */
-                let bioKey = await getBioKey();
+                let bioKey = await getBioKeyFromUser();
                 const aesKey = await crypto.subtle.importKey("raw", bioKey, "AES-GCM", false, ["encrypt", "decrypt"]);
                 savedPassphrase = await decryptText(enc, aesKey);
-                sessionStorageSet('passphrase', savedPassphrase);
                 console.log('debug: passphrase расшифрована и записана в sessionStorage!');
             } catch (e) {
                 console.log('debug: ошибка получения ключа');
@@ -117,21 +116,13 @@ const checkboxSavePassphrase = document.getElementById('savePassphrase');
         }
     }
 
+    // Автоматический вход
     if (savedPassphrase) {
         document.getElementById('passphrase').value = savedPassphrase; // Вставляем фразу в форму
         document.getElementById('passphrase').dispatchEvent(new Event('input', {bubbles: true})); // что бы сработал вызов updateSecretIcons
-    }
-
-    console.log('пробуем авто вход');
-    // Автоматический вход на случай перезагрузки страницы
-    if (savedPassphrase) {
-        let passphrase = savedPassphrase;
         evaluatePassphrase('passphrase', 'progress'); // посчитаем "сложность" пароля
-        console.log('debug: автоматический логин');
-        await doLogin(passphrase, true);
+        await doLogin(savedPassphrase, true);
     } else {
-        console.log('debug: passphrase не введена, покажем форму логина');
-        // покажем форму логина
         switchTo('loginArea');
     }
 })();
@@ -239,7 +230,6 @@ function escHandler(event) {
  */
 function onBtnLogoutClick(e) {
     e.preventDefault();
-    sessionStorageRemove('passphrase');
     localStorageRemove('encData');
     login = false;
     secretKey = false;
@@ -324,7 +314,6 @@ async function updateSettingSavePassphrase() {
                 localStorageRemove('credId');
                 localStorageRemove('salt');
                 localStorageRemove('encData');
-                sessionStorageRemove('bioKey');
                 credId = false;
             }
         }
@@ -1300,13 +1289,11 @@ async function doLogin(passphrase, doNotSave = false) {
     isLoggedIn = true; // установим флаг успешного логина
 
     // Сохраним введенную секретную фразу
-    sessionStorageSet('passphrase', passphrase); // для сессии
     if (settingSavePassphrase === '1' && !doNotSave) {
-        sessionStorageSet('passphrase', passphrase); // сохраняем в сессию
         let bioKey;
         try {
             console.log('doLogin: Шифруем и сохраняем passphrase в localStorage');
-            bioKey = await getBioKey();
+            bioKey = await getBioKeyFromUser();
 
         } catch (e) {
             console.error('doLogin -> getBioKey: ' + e);
@@ -2487,7 +2474,7 @@ function makeWysiwyg(id) {
             if (sourceMode) {
                 // === в текстовый режим ===
                 const html = editable.innerHTML
-                textarea.value = bbFromHtml(html);
+                textarea.value = htmlToBb(html);
                 editable.classList.add('hidden');
                 textarea.classList.remove('hidden');
                 btn.textContent = '✨';
@@ -2770,10 +2757,11 @@ function makeWysiwyg(id) {
         //alert('debug: bbToHtml '+bb);
         // noinspection HtmlUnknownTarget
         return bb
+            .replace(/\r\n?/g, '\n')
+            .replace(/^\n/, '')
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
-            .replace(/\r\n?/g, '\n')
             .replace(/\[url=(.*?)](.*?)\[\/url]/gi, '<a href="$1" target="_blank">$2</a>')
             .replace(/\[link=(.*?)](.*?)\[\/link]/gi, '<a href="$1" target="_blank">$2</a>')
             .replace(/\[justify](.*?)\[\/justify]/gis, '<div class="align-justify">$1</div>')
@@ -2782,7 +2770,7 @@ function makeWysiwyg(id) {
             .replace(/\[code](.*?)\[\/code]/gis, '<code>$1</code>')
             .replace(/\n*\[ol]\n*/gi, '<ol>').replace(/\n*\[\/ol]\n*/gi, '</ol>')
             .replace(/\n*\[ul]\n*/gi, '<ul>').replace(/\n*\[\/ul]\n*/gi, '</ul>')
-            .replace(/\[li]/gi, '<li>').replace(/\[\/li]\n?/gi, '</li>')
+            .replace(/\s*\[li]/gi, '<li>').replace(/\[\/li]\n?/gi, '</li>')
             .replace(/\[h3]/gi, '<h3>').replace(/\[\/h3]\n?/gi, '</h3>')
             .replace(/\[h4]/gi, '<h4>').replace(/\[\/h4]\n?/gi, '</h4>')
             .replace(/\[b]/gi, '<b>').replace(/\[\/b]/gi, '</b>')
@@ -2790,38 +2778,48 @@ function makeWysiwyg(id) {
             .replace(/\[u]/gi, '<u>').replace(/\[\/u]/gi, '</u>')
             .replace(/\[s]/gi, '<s>').replace(/\[\/s]/gi, '</s>')
             .replace(/\s*\[hr]\s*\n?/gi, '<hr>')
-            .replace(/\n/g, '<br>');
+            .replace(/\n/g, '<br>')
+            .replace(/(<br\s*\/?>\s*)+$/gi, ''); // убрать все <br> в конце текста
     }
 
 
-    function bbFromHtml(html) {
+    function htmlToBb(html) {
         //alert('debug: '+html);
         let out = html
+            .replace(/\r\n?/g, '\n')
             .replace(/<div class="align-center">(.*?)<\/div>/gis, '[center]$1[/center]')
             .replace(/<center>(.*?)<\/center>/gis, '[center]$1[/center]')
             .replace(/<div class="align-justify">(.*?)<\/div>/gis, '[justify]$1[/justify]')
-            .replace(/\r\n?/g, '\n')
-            .replace(/<div>/gi, '\n')
-            .replace(/<\/div>/gi, '')
-            .replace(/<hr[^>]*>\s*(?:<br\s*\/?>|\n|\r\n?)+/gi, '<hr>')
+            .replace(/<div[^>]*>/i, '\n') // только первый в тексте <div...>, что бы не пропадал перевод после первой строки
+            .replace(/<div[^>]*><br\s*\/?><\/div>/gi, '\n') // <div><br></div>
+            .replace(/<div[^>]*>/gi, '') // удаляем все открывающие <div
+            .replace(/<\/p><\/div>/gi, '\n') // что бы не было двойного перевода
+            .replace(/<\/div><\/div>/gi, '\n') // что бы не было двойного перевода
+            .replace(/<\/div>/gi, '\n')
             .replace(/<br\s*\/?>/gi, '\n')
-            .replace(/<div><br><\/div>/gi, '\n')
-            .replace(/<ol>/gi, '\n[ol]\n').replace(/<\/ol>/gi, '[/ol]\n\n')
-            .replace(/<ul>/gi, '\n[ul]\n').replace(/<\/ul>/gi, '[/ul]\n\n')
-            .replace(/<li>/gi, '[li]').replace(/<\/li>/gi, '[/li]\n')
-            .replace(/<b>/gi, '[b]').replace(/<\/b>/gi, '[/b]')
-            .replace(/<h3>/gi, '[h3]').replace(/<\/h3>/gi, '[/h3]\n')
-            .replace(/<h4>/gi, '[h4]').replace(/<\/h4>/gi, '[/h4]\n')
-            .replace(/<i>/gi, '[i]').replace(/<\/i>/gi, '[/i]')
-            .replace(/<u>/gi, '[u]').replace(/<\/u>/gi, '[/u]')
-            .replace(/<s>/gi, '[s]').replace(/<\/s>/gi, '[/s]')
+            .replace(/<p[^>]*>/gi, '\n')
+            .replace(/<\/p>/gi, '\n')
+            .replace(/<hr[^>]*>\s*(?:<br\s*\/?>|\n|\r\n?)+/gi, '<hr>')
+            .replace(/<ol[^>]*>/gi, '\n[ol]\n').replace(/<\/ol>/gi, '[/ol]\n\n') // особое форматирование! Лишние \n потом чистятся при сохранении в postProcess!
+            .replace(/<ul[^>]*>/gi, '\n[ul]\n').replace(/<\/ul>/gi, '[/ul]\n\n') // особое форматирование! Лишние \n потом чистятся при сохранении в postProcess!
+            .replace(/<li[^>]*>/gi, '   [li]').replace(/<\/li>/gi, '[/li]\n')
+            .replace(/<b[^>]*>/gi, '[b]').replace(/<\/b>/gi, '[/b]')
+            .replace(/<strong[^>]*>/gi, '[b]').replace(/<\/strong>/gi, '[/b]')
+            .replace(/<h3[^>]*>/gi, '[h3]').replace(/<\/h3>/gi, '[/h3]\n')
+            .replace(/<h4[^>]*>/gi, '[h4]').replace(/<\/h4>/gi, '[/h4]\n')
+            .replace(/<i[^>]*>/gi, '[i]').replace(/<\/i>/gi, '[/i]')
+            .replace(/<em[^>]*>/gi, '[i]').replace(/<\/em>/gi, '[/i]')
+            .replace(/<u[^>]*>/gi, '[u]').replace(/<\/u>/gi, '[/u]')
+            .replace(/<s[^>]*>/gi, '[s]').replace(/<\/s>/gi, '[/s]')
             .replace(/<a href="(.*?)".*?>(.*?)<\/a>/gi, '[url=$1]$2[/url]')
-            .replace(/<pre>(.*?)<\/pre>/gis, '[quote]$1[/quote]')
-            .replace(/<code>(.*?)<\/code>/gis, '[code]$1[/code]')
+            .replace(/<pre[^>]*>(.*?)<\/pre>/gis, '[quote]$1[/quote]')
+            .replace(/<code[^>]*>(.*?)<\/code>/gis, '[code]$1[/code]')
             .replace(/<hr[^>]*>/gi, '\n[hr]\n')
+            .replace(/\n+$/, '') // убрать переносы строки в конце текста
             .replace(/<\/?[^>]+>/g, ''); // убрать остаточные теги
 
         out = out
+            .replace(/^\n/, '') // убрать первый перенос строки в самом начале текста
             .replace(/&nbsp;/gi, ' ')
             .replace(/&amp;/gi, '&')
             .replace(/&lt;/gi, '<')
@@ -2833,6 +2831,7 @@ function makeWysiwyg(id) {
     function postProcess(bb) {
         return bb
             .replace(/\r\n?/g, '\n')
+            .replace(/^\n/, '')
             .replace(/\[li]/gi, '[li]').replace(/\[\/li]\n*/gi, '[/li]')
             .replace(/\n?\[ol]\n*/gi, '[ol]').replace(/\n*\[\/ol]\n?/gi, '[/ol]')
             .replace(/\n?\[ul]\n*/gi, '[ul]').replace(/\n*\[\/ul]\n?/gi, '[/ul]')
@@ -2847,7 +2846,7 @@ function makeWysiwyg(id) {
             //alert('debug: form submit action');
             const isVisible = !textarea.classList.contains('hidden');
             if (!isVisible) {
-                textarea.value = bbFromHtml(editable.innerHTML);
+                textarea.value = htmlToBb(editable.innerHTML);
             }
             textarea.value = postProcess(textarea.value);
         };
@@ -3432,7 +3431,6 @@ async function registerCredential() {
     }
     return false;
 }
-
     localStorageSet("credId", arrayBufferToBase64(cred.rawId));
     localStorageSet("salt", arrayBufferToBase64(salt));
     return arrayBufferToBase64(cred.rawId);
@@ -3493,24 +3491,6 @@ async function getBioKeyFromUser(){
         return false;
     }
     return rawKey; // БАЙТЫ!
-}
-
-async function getBioKey(){
-    let bioKey = sessionStorageGet('bioKey');
-    if (bioKey) {
-        console.log('getBioKey: bioKey найден в sessionStorage');
-        return base64ToArrayBuffer(bioKey); // Возвращаем сразу БАЙТЫ!
-    }
-        console.log('getBioKey: bioKey нет в sessionStorage нужно запросить bioKey у пользователя');
-        bioKey = await getBioKeyFromUser(); // Биометрического ключа нет в session, запросим у пользователя
-        if (bioKey) {
-            sessionStorageSet('bioKey', arrayBufferToBase64(bioKey)); // arrayBufferToBase64 правильно?? или не buffer
-            console.log('getBioKey: bioKey получен, записан в sessionStorage');
-            return bioKey; // БАЙТЫ!
-        } else {
-            // TODO: сюда не попадем, т.к. в случае ошибки с ключом вылетим по исключению!
-            console.log('debug: не получилось получить ключ биометрии');
-        }
 }
 
 async function updateSecretIcons(targetIds) {
