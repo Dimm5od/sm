@@ -322,10 +322,10 @@ async function updateSettingSavePassphrase() {
             credId = await registerCredential();
             if (!credId) {
                 // Не удалось активировать биометрию!
-                console.log('Не удалось активировать биометрию! Фраза не будет сохранена!')
                 alert('Не удалось активировать биометрию. Фраза не будет сохранена');
                 checkboxSavePassphrase.checked = false;
                 settingSavePassphrase = 0;
+                localStorageSet('savePassphrase','0');
             }
         }
     } else {
@@ -419,6 +419,17 @@ function onBtnTextAreaClick(e) {
 // ============================================================================================================
 // ===================== Остальные общие и вспомогательные функции ============================================
 // ===================== универсальные функции вынесены в main.js  ============================================
+
+
+// Обработчик кликов по тегам при просмотре статьи
+document.addEventListener('pointerup', event => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return; // реагируем только на ЛКМ
+    const span = event.target.closest('span.tag-label');
+    if (!span) return;
+    document.getElementById('searchQuery').value = span.textContent.trim();
+    switchTo(['searchArea','loginInfo']);
+    document.getElementById('searchBtn').click();
+});
 
 // === Help show ===
 document.getElementById('btnHelpArea').onclick = (e) => {
@@ -1343,14 +1354,6 @@ async function showResults(res) {
     container.classList.remove('hidden'); // покажем область результатов поиска
     container.innerHTML = '';
 
-    if (!res || typeof res !== 'object' || !res.results || !res.results.length) {
-        const empty = document.createElement('i');
-        empty.textContent = 'Ничего не найдено';
-        container.appendChild(empty);
-        return;
-    }
-
-    // есть результаты поиска
     container.innerHTML = "<div class='align-right'><a href='#' id='clearResultLink'>Очистить результаты <svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"currentColor\"><path d=\"M2.344 2.343h-.001a8 8 0 0 1 11.314 11.314A8.002 8.002 0 0 1 .234 10.089a8 8 0 0 1 2.11-7.746Zm1.06 10.253a6.5 6.5 0 1 0 9.108-9.275 6.5 6.5 0 0 0-9.108 9.275ZM6.03 4.97 8 6.94l1.97-1.97a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l1.97 1.97a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L8 9.06l-1.97 1.97a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734L6.94 8 4.97 6.03a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018Z\"></path></svg></a></div>";
     const clearResultLink = document.getElementById('clearResultLink');
     if (clearResultLink) {
@@ -1363,6 +1366,16 @@ async function showResults(res) {
         });
     }
 
+    if (!res || typeof res !== 'object' || !res.results || !res.results.length) {
+        const empty = document.createElement('div');
+        empty.className = 'note';
+        empty.classList.add('align-center');
+        empty.textContent = 'Ничего не найдено 🙁';
+        container.appendChild(empty);
+        return;
+    }
+
+    // есть результаты поиска
     for (const n of res.results) {
         const div = document.createElement('div');
         div.className = 'note';
@@ -1379,6 +1392,13 @@ async function showResults(res) {
         div.append(linkOpen);
         container.appendChild(div);
     }
+
+    // Если результат только один - сразу покажем его
+    if(res.results.length === 1){
+        document.getElementById('clearResultLink').click(); // очистим форму поиска
+        await viewNote(res.results[0].id);
+    }
+
 }
 
 // === Добавление ===
@@ -1508,7 +1528,8 @@ async function viewNote(id) {
         // Заполняем форму просмотра
         document.getElementById('viewTitle').textContent = noteTitle;
         document.getElementById('viewContent').innerHTML = noteContentView;
-        document.getElementById('viewDate').textContent = noteDate + ', ID #' + id;
+        document.getElementById('viewDate').innerHTML = noteDate + ', ID <span id="aid">#' + id + '</span>';
+        document.getElementById('aid').addEventListener('click', copyText); // Копирование ID заметки в буфер
         document.getElementById('viewTags').innerHTML = formatTags(noteTags, 'tag-label');
 
         // Кнопка закрытия
@@ -2049,7 +2070,7 @@ function bbcodeToHtml(input) {
 
     // 2. Преобразуем http/https в ссылки, кроме тех, что внутри [url=...]
     text = text.replace(
-        /(?<!\[url=)(?<!\[link=)(https?:\/\/[^\s<>\]\[]*?)([.,)]?)(?=$|\s|<|>|,|\)|])/gi,
+        /(?<!\[url=)(?<!\[link=)(?<!src=['"]*)(https?:\/\/[^\s<>\]\[]*?)([.,)]?)(?=$|\s|<|>|,|\)|])/gi,
         (match, url, punct) => {
             // Если последним символом URL является точка или запятая — выносим её за ссылку
             const lastChar = url.slice(-1);
@@ -2079,16 +2100,31 @@ function bbcodeToHtml(input) {
         {re: /\[quote](.*?)\[\/quote]/gis, to: "<pre>$1</pre>"},
         {re: /\[justify](.*?)\[\/justify]/gis, to: "<div class='align-justify'>$1</div>"},
         {re: /\[center](.*?)\[\/center]/gis, to: "<div class='align-center'>$1</div>"},
+       // {
+       //     re: /\[iframe]([^\]]+)\[\/iframe]/gis,
+       //     to: '<iframe $1></iframe>'
+       // },
         {
+            re: /\[id=([^\]]+)]/gis,
+            to: '<span id="$1" class="link-id"></span>'
+        },
+        {
+            // Внутренние ссылки на другие статьи
             re: /\[url=#([0-9]+)](.*?)\[\/url]/gis,
             to: '<a href="#$1" data-id="$1" class="internal-link">$2</a>'
         },
         {
+            // Внутренние ссылки внутри одного документа
+            re: /\[url=#([0-9a-z_-]+)](.*?)\[\/url]/gis,
+            to: '<a href="#$1" class="internal-href">$2</a>'
+        },
+        {
+            // Ссылки на загрузку файлов
             re: /\[url=https:\/\/(www\.dropbox\.com|1drv\.ms|drive\.google\.com|cloud\.mail\.ru)([^\]#]+)](.*?)\[\/url]/gis,
             to: '<a href="https://$1$2" class="link-with-icon" target="_blank" rel="noopener noreferrer">$3</a>'
         },
         {
-            re: /\[url=([^\]#]+)](.*?)\[\/url]/gis,
+            re: /\[url=([^\]]+)](.*?)\[\/url]/gis,
             to: '<a href="$1" target="_blank" rel="noopener noreferrer">$2</a>'
         },
         {
@@ -2739,17 +2775,9 @@ function makeWysiwyg(id) {
     // =======================
     // === поведение фокуса ===
     // =======================
-    editable.addEventListener('mousedown', e => {
-        // просто ставим фокус, ничего не вставляем
-        if (e.button === 0) {
-            e.stopPropagation();
-            editable.focus();
-        }
-    });
-
     editable.addEventListener('mouseup', e => {
         e.stopPropagation();
-        editable.focus();
+        editable.focus({ preventScroll: true });
     });
 
     // конвертеры BB↔HTML
@@ -2797,7 +2825,8 @@ function makeWysiwyg(id) {
             .replace(/<\/div><\/div>/gi, '\n') // что бы не было двойного перевода
             .replace(/<\/div>/gi, '\n')
             .replace(/<br\s*\/?>/gi, '\n')
-            .replace(/<p[^>]*>/gi, '\n')
+            .replace(/<p [^>]*>/gi, '\n')
+            .replace(/<p>/gi, '\n')
             .replace(/<\/p>/gi, '\n')
             .replace(/<hr[^>]*>\s*(?:<br\s*\/?>|\n|\r\n?)+/gi, '<hr>')
             .replace(/<ol[^>]*>/gi, '\n[ol]\n').replace(/<\/ol>/gi, '[/ol]\n\n') // особое форматирование! Лишние \n потом чистятся при сохранении в postProcess!
@@ -2812,8 +2841,8 @@ function makeWysiwyg(id) {
             .replace(/<u[^>]*>/gi, '[u]').replace(/<\/u>/gi, '[/u]')
             .replace(/<s[^>]*>/gi, '[s]').replace(/<\/s>/gi, '[/s]')
             .replace(/<a href="(.*?)".*?>(.*?)<\/a>/gi, '[url=$1]$2[/url]')
-            .replace(/<pre[^>]*>(.*?)<\/pre>/gis, '[quote]$1[/quote]')
-            .replace(/<code[^>]*>(.*?)<\/code>/gis, '[code]$1[/code]')
+            .replace(/<pre>(.*?)<\/pre>/gis, '[quote]$1[/quote]')
+            .replace(/<code>(.*?)<\/code>/gis, '[code]$1[/code]')
             .replace(/<hr[^>]*>/gi, '\n[hr]\n')
             .replace(/\n+$/, '') // убрать переносы строки в конце текста
             .replace(/<\/?[^>]+>/g, ''); // убрать остаточные теги
@@ -3644,6 +3673,31 @@ function expandTags(text) {
 
     // Возвращаем отсортированный список без дублей
     return Array.from(result).join(', ');
+}
+
+function copyText(event) {
+    const el = event.currentTarget; // элемент, на котором висит обработчик
+    const text = el.textContent.trim();
+
+    navigator.clipboard.writeText(text).then(() => {
+        let tooltip = el.nextElementSibling;
+        if (!tooltip || !tooltip.classList.contains('tooltip')) {
+            tooltip = document.createElement('span');
+            tooltip.className = 'tooltip';
+            el.after(tooltip);
+        }
+
+        tooltip.textContent = 'скопировано';
+
+        tooltip.classList.remove('is-visible');
+        tooltip.offsetHeight; // reflow для перезапуска transition
+        tooltip.classList.add('is-visible');
+
+        clearTimeout(tooltip._hideTimer);
+        tooltip._hideTimer = setTimeout(() => {
+            tooltip.classList.remove('is-visible');
+        }, 1000);
+    });
 }
 
 

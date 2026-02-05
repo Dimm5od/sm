@@ -2,6 +2,7 @@ html, body {
     height: 100%;
     margin: 0;
     padding: 0;
+    scroll-behavior: smooth;
 }
 
 body {
@@ -174,14 +175,14 @@ button.normal, input.normal {width: auto; margin: 5px 0; padding: 10px; font-siz
 .container {
         flex: 1;
         padding: 15px;
-        margin-right: auto;
-        margin-left: auto;
+        /* margin-right: auto;
+        margin-left: auto; */
 }
 
 footer {
     text-align: center;
-    padding: 15px;
-    font-size: 14px;
+    padding: 10px;
+    font-size: 11px;
     color: #666;
 }
     .page-header {
@@ -336,6 +337,7 @@ footer {
         line-height: 1.5;
         white-space: nowrap;
         user-select: none;
+        cursor: pointer;
     }
     .tag-label::before {
         content: "🏷️ ";
@@ -369,13 +371,41 @@ footer {
     transform-origin: center;
 }
 
+#aid {
+    cursor: pointer;
+    position: relative;
+    border-bottom: dotted 1px;
+}
+
+.tooltip {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 4px 8px;
+    font-size: 12px;
+    line-height: 1;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+
+    opacity: 0;
+    transform: translateY(-2px);
+    transition: opacity 250ms ease, transform 250ms ease;
+
+    pointer-events: none;
+    user-select: none;
+}
+
+.tooltip.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+
     @media (max-width: 500px) {
         /* body { background: yellow; } */
         .container {
             flex: 1;
             padding: 10px;
-            margin-right: unset;
-            margin-left: unset;
         }
         #btnNew {
             font-size: 0; /* Скрываем текст внутри */
@@ -389,26 +419,12 @@ footer {
         }
     }
 
-    @media (min-width: 768px) {
-        .container {
-            flex: 1;
-            padding: 10px;
-            width: 750px;
-        }
-    }
-
-    @media (min-width: 992px) {
-        .container {
-            flex: 1;
-            padding: 10px;
-            width: 970px;
-        }
-    }
-
     @media (min-width: 1200px) {
         .container {
             flex: 1;
-            padding: 10px;
+            padding: 15px;
+            margin-right: auto;
+            margin-left: auto;
             width: 1170px;
         }
     }

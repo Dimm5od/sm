@@ -6,8 +6,8 @@
     <meta http-equiv="Content-Security-Policy"
           content="default-src 'none';
             manifest-src 'self';
-            script-src 'self' 'nonce-c13d9af436';
-             connect-src https://cptp.exima-online.net/smemo/ https://sm2.autocrash.com.ua/ https://sm3.autocrash.com.ua/ https://dimm5od.github.io/sm/;
+            script-src 'self';
+            connect-src https://cptp.exima-online.net/smemo/ https://sm2.autocrash.com.ua/ https://sm3.autocrash.com.ua/ https://dimm5od.github.io/sm/;
             style-src 'self';
             img-src 'self' data: blob:;
             base-uri 'none';
@@ -48,13 +48,12 @@
         </div>
 
         <form id="loginForm">
-
             <div><label for="passphrase">Секретная фраза: <span id="secretIcons2"></span></label></div>
             <div class="progress-container">
                 <div class="progress-bar" id="progress"></div>
             </div>
             <div class="password-wrapper">
-                <input type="password" id="passphrase" placeholder="Введите вашу секретную фразу" required
+                <input type="password" id="passphrase" autocomplete="current-password" placeholder="Введите вашу секретную фразу" required
                        value=""><span class="password-toggle" id="toggle" data-toggle="passphrase">&#128065;</span>
             </div>
             <div>[ <a href="#" id="lnkSettings">Настройки</a> ]</div>
@@ -189,12 +188,12 @@
 
     <div id="viewArea" class="hidden">
         <div id="viewActionButtons" class="align-right">
-            <button id="btnActionClose" class="small">Закрыть</button>
             <button id="btnActionEdit" class="small">Правка</button>
             <button id="btnActionDelete" class="color-red small">Удалить</button>
+            <button id="btnActionClose" class="small">Закрыть</button>
         </div>
         <div class="page-header">
-            <div id="viewDate" class="noteDate"></div>
+            <div id="viewDate" class="noteDate"><span id="aid"></span></div>
             <h2 id="viewTitle"></h2>
         </div>
         <div id="viewContent"></div>
@@ -214,10 +213,11 @@
     </div>
 
     <div id="passwdArea" class="hidden">
+        <form>
         <h2>Изменение секретной фразы</h2>
         <label for="passphrase1">Старая фраза: <span id="secretIcons3"></span></label>
         <div class="password-wrapper">
-            <input type="password" id="passphrase1" placeholder="Введите старую фразу" required
+            <input type="password" id="passphrase1" placeholder="Введите старую фразу" autocomplete="current-password" required
                    value="" readonly><span
                 class="password-toggle" id="toggle3" data-toggle="passphrase1">&#128065;</span>
         </div>
@@ -227,12 +227,13 @@
             <div class="progress-bar" id="progress2"></div>
         </div>
         <div class="password-wrapper">
-            <input type="password" id="passphrase2" placeholder="Введите новую фразу" required
+            <input type="password" id="passphrase2"  autocomplete="new-password" placeholder="Введите новую фразу" required
                    value=""><span
                 class="password-toggle" id="toggle4" data-toggle="passphrase2">&#128065;</span>
         </div>
         <button type="button" id="btnDoPasswd" class="actionBtn">Изменить секретную фразу</button>
         <button type="button" id="btnCancelPasswd">Отменить</button>
+        </form>
     </div>
 
     <div id="helpArea" class="hidden">
